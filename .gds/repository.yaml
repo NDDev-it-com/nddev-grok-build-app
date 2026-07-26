@@ -1,7 +1,7 @@
 schema_version: 1
 repository:
   id: "repo_01KYFBZ42K5N21K9W701HE4Y2W"
-  display_name: "nddev-grok-cli-app"
+  display_name: "nddev-grok-build-app"
   roles:
     - "module"
   lifecycle: "active"
@@ -10,7 +10,7 @@ provider:
   installation: "installation:github-organization"
   repository_id: 1312851767
   owner: "NDDev-it-com"
-  name: "nddev-grok-cli-app"
+  name: "nddev-grok-build-app"
 classification:
   portfolios:
     - "portfolio:organization-projects"

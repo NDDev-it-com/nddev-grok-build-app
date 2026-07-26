@@ -1,10 +1,10 @@
 {
   "contract_version": 1,
-  "product_name": "nddev-grok-cli-app",
-  "github_repository": "NDDev-it-com/nddev-grok-cli-app",
+  "product_name": "nddev-grok-build-app",
+  "github_repository": "NDDev-it-com/nddev-grok-build-app",
   "license": "AGPL-3.0-or-later",
   "skeleton": {
     "status": "skeleton",
-    "harness_id": "grok-cli"
+    "harness_id": "grok-build"
   }
 }

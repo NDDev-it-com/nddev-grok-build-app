@@ -26,6 +26,29 @@ hardlinked managed files, and oversized managed reads. If a write fails after
 mutation starts, the previous managed state is restored from an in-process
 snapshot.
 
+## Target-Owned Software
+
+`software-status`, `install-cli`, and `update-cli` manage the Grok Build runtime
+separately from setup switching. Production installs use only
+`https://x.ai/cli/install.sh` with exact version `0.2.112`; the installer script
+is accepted only when its SHA-256 is
+`0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952`.
+
+The vendor installer runs in a temporary staging area with isolated `HOME`,
+`GROK_BIN_DIR`, and `PATH`. The manager version-probes only the staging
+`grok` binary, then persists a regular target-owned executable at `bin/grok`
+and `.nddev-software/grok-build/versions/0.2.112/grok`. It discards staging
+shell rc files, completions, installer `config.toml`, and the vendor `agent`
+alias.
+
+`install-cli` requires absent target-owned software presence. `update-cli`
+requires existing safe target-owned presence and can repair a missing or corrupt
+identity stamp. Symlink, hardlink, wrong-type, non-private mode, and escaping
+paths fail closed before installer download or execution.
+
+`launch` requires both a clean managed setup and current target-owned software.
+It executes only `<target>/bin/grok` and never falls back to `PATH`.
+
 ## Unsupported Capabilities
 
 The module does not publish an external Grok plugin marketplace. The

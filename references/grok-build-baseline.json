@@ -34,7 +34,13 @@
     },
     "changelog_latest_page_version": "0.2.111",
     "changelog_latest_page_date": "2026-07-22",
-    "changelog_url": "https://x.ai/build/changelog"
+    "changelog_url": "https://x.ai/build/changelog",
+    "official_installer": "https://x.ai/cli/install.sh",
+    "official_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+    "official_installer_exact_version_arg": "0.2.112",
+    "module_install_mechanism": "vendor-installer-only",
+    "module_npm_install_supported": false,
+    "published_binary_checksum": null
   },
   "source_repository": {
     "url": "https://github.com/xai-org/grok-build",

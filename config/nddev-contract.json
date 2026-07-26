@@ -23,6 +23,9 @@
     "switch_command": "python3 cli-tools/nddev_grok_build.py switch --setup <id> --target <absolute-dir> [--json]",
     "restore_command": "python3 cli-tools/nddev_grok_build.py restore --backup <0..9> --target <absolute-dir> [--json]",
     "remove_command": "python3 cli-tools/nddev_grok_build.py remove --target <absolute-dir> [--json]",
+    "software_status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-dir> [--json]",
+    "software_install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-dir> [--json]",
+    "software_update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-dir> [--json]",
     "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> -- [args...]"
   },
   "managed_state": {
@@ -50,7 +53,7 @@
   },
   "runtime_launch": {
     "command": "grok",
-    "direct_command": "GROK_HOME=<absolute-target> grok [args...]",
+    "direct_command": "GROK_HOME=<absolute-target> <absolute-target>/bin/grok [args...]",
     "environment_variable": "GROK_HOME",
     "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> -- [args...]",
     "forwards_arguments": true,
@@ -58,7 +61,44 @@
     "streams_child_stdio": true,
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112",
+    "managed_command": "bin/grok",
+    "requires_current_target_owned_software": true,
+    "path_fallback": false,
     "json_manager_errors_supported": true
+  },
+  "software_lifecycle": {
+    "stamp_file": "NDDEV-GROK-BUILD-SOFTWARE.json",
+    "stamp_schema": 1,
+    "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target /absolute/target --json",
+    "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/target --json",
+    "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/target --json",
+    "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-GROK-BUILD-SOFTWARE.json, .nddev-software/grok-build, .nddev-software/grok-build/versions/0.2.112, or bin/grok",
+    "install_precondition": "install-cli refuses any existing target-owned software presence; use update-cli for partial or existing state",
+    "update_precondition": "update-cli repairs existing safe target-owned software presence and refuses absent software state",
+    "official_installer": "https://x.ai/cli/install.sh",
+    "installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+    "version": "0.2.112",
+    "command": "grok",
+    "target_owned": true,
+    "software_root": ".nddev-software/grok-build/versions/0.2.112",
+    "entrypoint": "bin/grok",
+    "status_executes_binary": false,
+    "version_probe": "staging binary only",
+    "stage_env": {
+      "HOME": "<stage>/home",
+      "GROK_BIN_DIR": "<stage>/bin",
+      "TMPDIR": "<stage>/tmp",
+      "PATH": "<stage>/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    },
+    "persisted_stage_paths": ["bin/grok", ".nddev-software/grok-build/versions/0.2.112/grok"],
+    "discarded_stage_paths": ["shell rc files", "completions", "installer config.toml", "agent alias"],
+    "private_modes": {
+      "directories": "0700",
+      "stamp": "0600",
+      "binary": "0700"
+    },
+    "rollback_on_failure": true,
+    "credential_inheritance": "provider secrets are not inherited by installer subprocesses or launch"
   },
   "permission_defaults": {
     "safe": {

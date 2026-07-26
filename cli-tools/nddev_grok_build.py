@@ -13,7 +13,9 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -25,12 +27,36 @@ BUILDER_ROOT = ROOT / "builder" / "nddev-builder"
 SETUP_ORDER = ("safe", "balanced", "full-auto")
 STAMP_NAME = "NDDEV-GROK-BUILD-SETUP.json"
 BACKUP_NAME = "NDDEV-GROK-BUILD-BACKUP.json"
+SOFTWARE_STAMP_NAME = "NDDEV-GROK-BUILD-SOFTWARE.json"
 MANAGED_BEGIN = "# BEGIN NDDEV-GROK-BUILD MANAGED"
 MANAGED_END = "# END NDDEV-GROK-BUILD MANAGED"
 OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
+OWNER_EXEC_MODE = 0o700
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
+SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
+GROK_COMMAND = "grok"
+GROK_VERSION = "0.2.112"
+INSTALLER_URL = "https://x.ai/cli/install.sh"
+INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
+INTERNAL_INSTALLER_URL_ENV = "NDDEV_GROK_BUILD_TEST_INSTALLER_URL"
+INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV = "NDDEV_GROK_BUILD_TEST_FAIL_AFTER_VERSION_SWAP"
+INTERNAL_FAIL_AFTER_BINARY_SWAP_ENV = "NDDEV_GROK_BUILD_TEST_FAIL_AFTER_BINARY_SWAP"
+INTERNAL_INSTALLER_TIMEOUT_ENV = "NDDEV_GROK_BUILD_TEST_INSTALLER_TIMEOUT_SECONDS"
+INTERNAL_PROBE_TIMEOUT_ENV = "NDDEV_GROK_BUILD_TEST_PROBE_TIMEOUT_SECONDS"
+SAFE_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+PROVIDER_SECRET_NAMES = {
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "GROK_API_KEY",
+    "GROK_DEPLOYMENT_KEY",
+    "GROK_PROXY_URL",
+    "XAI_API_KEY",
+    "XAI_TOKEN",
+}
 CONTENT_MANAGED_PATHS = (
     "config.toml",
     "AGENTS.md",
@@ -91,6 +117,14 @@ def stat_existing(path: Path, label: str) -> os.stat_result | None:
     return info
 
 
+def require_current_user_owner(info: os.stat_result, label: str) -> None:
+    get_effective_uid = getattr(os, "geteuid", None)
+    if not callable(get_effective_uid):
+        return
+    if info.st_uid != get_effective_uid():
+        fail(f"{label} must be owned by the current user")
+
+
 def require_real_directory(path: Path, label: str) -> os.stat_result:
     info = stat_existing(path, label)
     if info is None:
@@ -102,17 +136,50 @@ def require_real_directory(path: Path, label: str) -> os.stat_result:
 
 def validate_target(target: Path, *, create: bool = False) -> Path:
     parent = target.parent
-    parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    require_real_directory(parent, "target parent")
+    if create:
+        create_missing_directories(missing_directory_chain(parent))
+        require_real_directory(parent, "target parent")
+    else:
+        parent_info = stat_existing(parent, "target parent")
+        if parent_info is None:
+            return target.resolve(strict=False)
+        if not stat.S_ISDIR(parent_info.st_mode):
+            fail("target parent must be a directory")
     info = stat_existing(target, "target")
     if info is None:
         if not create:
             return target.resolve(strict=False)
         target.mkdir(mode=OWNER_DIRECTORY_MODE)
+        target.chmod(OWNER_DIRECTORY_MODE)
         return target.resolve()
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a real directory")
     return target.resolve()
+
+
+def missing_directory_chain(path: Path) -> list[Path]:
+    chain: list[Path] = []
+    current = path
+    while current != current.parent and not current.exists() and not current.is_symlink():
+        chain.append(current)
+        current = current.parent
+    return chain
+
+
+def create_missing_directories(chain: list[Path]) -> None:
+    for path in reversed(chain):
+        try:
+            path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            fail(f"directory appeared while creating target parent chain: {path}")
+        path.chmod(OWNER_DIRECTORY_MODE)
+        require_private_directory(path, f"created target parent {path}")
+
+
+def remove_created_empty_directories(chain: list[Path]) -> None:
+    for path in chain:
+        with contextlib.suppress(FileNotFoundError, OSError):
+            path.rmdir()
 
 
 def backup_pool(target: Path) -> Path:
@@ -125,7 +192,8 @@ def lock_path(target: Path) -> Path:
 
 @contextlib.contextmanager
 def target_lock(target: Path):
-    target.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    created_parent_chain = missing_directory_chain(target.parent)
+    create_missing_directories(created_parent_chain)
     require_real_directory(target.parent, "target parent")
     path = lock_path(target)
     try:
@@ -137,6 +205,7 @@ def target_lock(target: Path):
     finally:
         with contextlib.suppress(FileNotFoundError):
             path.rmdir()
+        remove_created_empty_directories(created_parent_chain)
 
 
 def safe_target_path(target: Path, relative: str) -> Path:
@@ -462,7 +531,8 @@ def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
 
 
 def choose_backup_slot(pool: Path) -> int:
-    pool.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    create_missing_directories(missing_directory_chain(pool.parent))
+    ensure_private_directory(pool, "backup pool")
     for slot in range(10):
         if not (pool / str(slot)).exists():
             return slot
@@ -646,6 +716,769 @@ def prune_empty_managed_dirs(target: Path) -> None:
             directory.rmdir()
 
 
+def software_container(target: Path) -> Path:
+    return target / ".nddev-software"
+
+
+def software_root(target: Path) -> Path:
+    return software_container(target) / "grok-build"
+
+
+def software_versions_dir(target: Path) -> Path:
+    return software_root(target) / "versions"
+
+
+def software_version_dir(target: Path) -> Path:
+    return software_versions_dir(target) / GROK_VERSION
+
+
+def software_tree_binary(target: Path) -> Path:
+    return software_version_dir(target) / GROK_COMMAND
+
+
+def managed_grok_path(target: Path) -> Path:
+    return target / "bin" / GROK_COMMAND
+
+
+def software_stamp_path(target: Path) -> Path:
+    return software_root(target) / SOFTWARE_STAMP_NAME
+
+
+def existing_path_label(path: Path, label: str) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return label
+
+
+def software_presence(target: Path) -> list[str]:
+    labels = (
+        (software_stamp_path(target), SOFTWARE_STAMP_NAME),
+        (software_container(target), ".nddev-software"),
+        (software_root(target), ".nddev-software/grok-build"),
+        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+        (managed_grok_path(target), "bin/grok"),
+    )
+    return sorted(label for path, label in labels if existing_path_label(path, label) is not None)
+
+
+def require_private_directory(path: Path, label: str) -> os.stat_result:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    require_current_user_owner(info, label)
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must have mode 0700")
+    return info
+
+
+def ensure_private_directory(path: Path, label: str) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        require_private_directory(path, label)
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    require_current_user_owner(info, label)
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must have mode 0700")
+
+
+def ensure_private_parent(path: Path, target: Path) -> None:
+    relative_parent = path.relative_to(target).parent
+    current = target
+    for part in relative_parent.parts:
+        current = current / part
+        info = stat_existing(current, f"software directory {current}")
+        if info is None:
+            current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
+            require_private_directory(current, f"software parent {current}")
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"software parent is not a directory: {current}")
+        require_current_user_owner(info, f"software parent {current}")
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail(f"software parent must have mode 0700: {current}")
+
+
+def require_software_regular_file(
+    path: Path, label: str, *, max_bytes: int = SOFTWARE_MAX_BYTES
+) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    require_current_user_owner(info, label)
+    if info.st_nlink != 1:
+        fail(f"{label} must not be a hardlink")
+    if info.st_size > max_bytes:
+        fail(f"{label} is too large")
+    return info
+
+
+def read_software_file(path: Path, label: str, *, max_bytes: int = SOFTWARE_MAX_BYTES) -> bytes:
+    before = require_software_regular_file(path, label, max_bytes=max_bytes)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            fail(f"{label} changed while opening")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            fail(f"{label} changed to an unsafe file")
+        require_current_user_owner(opened, label)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                fail(f"{label} is too large")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = require_software_regular_file(path, label, max_bytes=max_bytes)
+    expected = (before.st_dev, before.st_ino)
+    if (after.st_dev, after.st_ino) != expected or (final.st_dev, final.st_ino) != expected:
+        fail(f"{label} changed while reading")
+    return b"".join(chunks)
+
+
+def read_optional_software_file(path: Path, label: str) -> bytes | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    return read_software_file(path, label)
+
+
+def snapshot_optional_software_file(path: Path, label: str) -> tuple[bytes | None, int | None]:
+    if not path.exists() and not path.is_symlink():
+        return None, None
+    data = read_software_file(path, label)
+    info = require_software_regular_file(path, label)
+    return data, stat.S_IMODE(info.st_mode)
+
+
+def software_file_mode_is(path: Path, mode: int) -> bool:
+    info = path.lstat()
+    return not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) == mode
+
+
+def software_atomic_write(path: Path, data: bytes, target: Path, mode: int) -> None:
+    ensure_private_parent(path, target)
+    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+
+
+def remove_empty_directory_if_created(path: Path, existed_before: bool) -> None:
+    if existed_before:
+        return
+    with contextlib.suppress(FileNotFoundError, OSError):
+        path.rmdir()
+
+
+def read_url_or_file(source: str, *, max_bytes: int) -> bytes:
+    if source.startswith("file://"):
+        return read_software_file(
+            Path(source[7:]), f"Grok Build installer {source}", max_bytes=max_bytes
+        )
+    request = urllib.request.Request(source, headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        expected_length = response.headers.get("Content-Length")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                fail("Grok Build installer exceeds bounded read limit")
+            chunks.append(chunk)
+    content = b"".join(chunks)
+    if expected_length is not None and int(expected_length) != len(content):
+        fail("Grok Build installer length changed while reading")
+    return content
+
+
+def minimal_process_env(
+    extra_path: str | None = None, *, tmp_dir: Path | None = None
+) -> dict[str, str]:
+    path = SAFE_SYSTEM_PATH
+    if extra_path:
+        path = f"{extra_path}:{path}"
+    env = {
+        "PATH": path,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "HOME": "/nonexistent",
+        "SHELL": "",
+    }
+    if tmp_dir is not None:
+        env["TMPDIR"] = str(tmp_dir)
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    for name in PROVIDER_SECRET_NAMES:
+        env.pop(name, None)
+    return env
+
+
+def installer_source_url() -> str:
+    return os.environ.get(INTERNAL_INSTALLER_URL_ENV) or INSTALLER_URL
+
+
+def internal_timeout_seconds(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        timeout = float(value)
+    except ValueError:
+        fail(f"{name} must be a positive timeout in seconds")
+    if timeout <= 0:
+        fail(f"{name} must be a positive timeout in seconds")
+    return timeout
+
+
+def read_pinned_installer() -> tuple[bytes, str, str]:
+    source = installer_source_url()
+    installer = read_url_or_file(source, max_bytes=2 * 1024 * 1024)
+    digest = sha256_bytes(installer)
+    if source == INSTALLER_URL and digest != INSTALLER_SHA256:
+        fail("official Grok Build installer SHA-256 mismatch")
+    return installer, digest, source
+
+
+def software_stamp(
+    target: Path,
+    *,
+    installer_source: str,
+    installer_sha256: str,
+    binary_sha256: str,
+    version_output: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(validate_target(target, create=False)),
+        "command": GROK_COMMAND,
+        "version": GROK_VERSION,
+        "installer_url": installer_source,
+        "installer_sha256": installer_sha256,
+        "binary_sha256": binary_sha256,
+        "version_output": version_output,
+        "installed_at": int(time.time()),
+    }
+
+
+def load_software_stamp(
+    target: Path, *, repairable_identity: bool = False
+) -> dict[str, Any] | None:
+    path = software_stamp_path(target)
+    if not path.exists() and not path.is_symlink():
+        return None
+    info = require_software_regular_file(
+        path, f"Grok Build software stamp {path}", max_bytes=METADATA_MAX_BYTES
+    )
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        if repairable_identity:
+            return None
+        fail("Grok Build software stamp must have mode 0600")
+    try:
+        value = json.loads(
+            read_software_file(
+                path, f"Grok Build software stamp {path}", max_bytes=METADATA_MAX_BYTES
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        if repairable_identity:
+            return None
+        fail(f"Grok Build software stamp is invalid JSON: {exc}")
+    if not isinstance(value, dict):
+        if repairable_identity:
+            return None
+        fail("Grok Build software stamp must contain a JSON object")
+    required = {
+        "schema_version",
+        "product_name",
+        "build_version",
+        "canonical_target",
+        "command",
+        "version",
+        "installer_url",
+        "installer_sha256",
+        "binary_sha256",
+        "version_output",
+        "installed_at",
+    }
+    try:
+        if set(value) != required:
+            fail("Grok Build software stamp has invalid keys")
+        if (
+            value["schema_version"] != 1
+            or value["product_name"] != PRODUCT_NAME
+            or value["canonical_target"] != str(validate_target(target, create=False))
+            or value["command"] != GROK_COMMAND
+        ):
+            fail("Grok Build software stamp identity is invalid")
+        for digest_key in ("installer_sha256", "binary_sha256"):
+            if not isinstance(value[digest_key], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", value[digest_key]
+            ):
+                fail(f"Grok Build software stamp {digest_key} must be a SHA-256 digest")
+        if not isinstance(value["version"], str):
+            fail("Grok Build software stamp version is invalid")
+        if (
+            not isinstance(value["version_output"], str)
+            or GROK_VERSION not in value["version_output"]
+        ):
+            fail("Grok Build software stamp version output is invalid")
+        if not isinstance(value["installed_at"], int):
+            fail("Grok Build software stamp installed_at is invalid")
+    except GrokBuildSetupError:
+        if repairable_identity:
+            return None
+        raise
+    return value
+
+
+def software_directory_mode_drift(path: Path, label: str) -> str | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    info = stat_existing(path, label)
+    if info is None:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    require_current_user_owner(info, label)
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        return f"{label}:mode"
+    return None
+
+
+def software_status(target: Path) -> dict[str, Any]:
+    canonical = validate_target(target, create=False)
+    base: dict[str, Any] = {
+        "schema_version": 1,
+        "command": "software-status",
+        "target": str(canonical),
+        "installed": False,
+        "current": False,
+        "present": False,
+        "presence": [],
+        "version": None,
+        "expected_version": GROK_VERSION,
+        "managed_command": str(managed_grok_path(target).resolve(strict=False)),
+        "drift": [],
+    }
+    if not target.exists() and not target.is_symlink():
+        return base
+    require_private_directory(target, "target")
+    presence = software_presence(target)
+    base["present"] = bool(presence)
+    base["presence"] = presence
+    drift: list[str] = []
+    directory_mode_drift = False
+    for directory, label in (
+        (software_container(target), ".nddev-software"),
+        (software_root(target), ".nddev-software/grok-build"),
+        (software_versions_dir(target), ".nddev-software/grok-build/versions"),
+        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+        (managed_grok_path(target).parent, "bin"),
+    ):
+        directory_drift = software_directory_mode_drift(directory, label)
+        if directory_drift is not None:
+            drift.append(directory_drift)
+            directory_mode_drift = True
+    stamp_file = software_stamp_path(target)
+    if stamp_file.exists() or stamp_file.is_symlink():
+        stamp_info = require_software_regular_file(
+            stamp_file, f"Grok Build software stamp {stamp_file}", max_bytes=METADATA_MAX_BYTES
+        )
+        if stat.S_IMODE(stamp_info.st_mode) != OWNER_FILE_MODE:
+            drift.append("software-stamp:mode")
+    stamp = load_software_stamp(target, repairable_identity=True)
+    if stamp is None:
+        for partial_file, label in (
+            (managed_grok_path(target), "bin/grok"),
+            (
+                software_tree_binary(target),
+                f".nddev-software/grok-build/versions/{GROK_VERSION}/grok",
+            ),
+        ):
+            if partial_file.exists() or partial_file.is_symlink():
+                read_software_file(partial_file, f"Grok Build partial software file {partial_file}")
+                if not software_file_mode_is(partial_file, OWNER_EXEC_MODE):
+                    drift.append(f"{label}:mode")
+        if presence:
+            drift.append("software-stamp")
+    else:
+        binary = read_optional_software_file(
+            managed_grok_path(target), f"Grok Build managed binary {managed_grok_path(target)}"
+        )
+        version_binary = read_optional_software_file(
+            software_tree_binary(target),
+            f"Grok Build version binary {software_tree_binary(target)}",
+        )
+        binary_ok = binary is not None and sha256_bytes(binary) == stamp["binary_sha256"]
+        version_ok = (
+            version_binary is not None and sha256_bytes(version_binary) == stamp["binary_sha256"]
+        )
+        binary_mode_ok = binary is not None and software_file_mode_is(
+            managed_grok_path(target), OWNER_EXEC_MODE
+        )
+        version_mode_ok = version_binary is not None and software_file_mode_is(
+            software_tree_binary(target), OWNER_EXEC_MODE
+        )
+        if not binary_ok:
+            drift.append("bin/grok")
+        elif not binary_mode_ok:
+            drift.append("bin/grok:mode")
+        if not version_ok:
+            drift.append(f".nddev-software/grok-build/versions/{GROK_VERSION}/grok")
+        elif not version_mode_ok:
+            drift.append(f".nddev-software/grok-build/versions/{GROK_VERSION}/grok:mode")
+        installed = (
+            binary_ok
+            and version_ok
+            and binary_mode_ok
+            and version_mode_ok
+            and not directory_mode_drift
+        )
+        expected = {
+            "build_version": VERSION,
+            "version": GROK_VERSION,
+            "installer_url": INSTALLER_URL,
+            "installer_sha256": INSTALLER_SHA256,
+        }
+        for key, expected_value in expected.items():
+            if stamp[key] != expected_value:
+                drift.append(key)
+        base["installed"] = installed
+        base["version"] = stamp["version"]
+    base["drift"] = drift
+    base["current"] = bool(base["installed"]) and not drift
+    return base
+
+
+def validate_safe_software_presence(target: Path) -> None:
+    for directory, label in (
+        (managed_grok_path(target).parent, "bin"),
+        (software_container(target), ".nddev-software"),
+        (software_root(target), ".nddev-software/grok-build"),
+        (software_versions_dir(target), ".nddev-software/grok-build/versions"),
+        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+    ):
+        if directory.exists() or directory.is_symlink():
+            require_private_directory(directory, label)
+    for file_path, label, mode in (
+        (managed_grok_path(target), "bin/grok", OWNER_EXEC_MODE),
+        (
+            software_tree_binary(target),
+            f".nddev-software/grok-build/versions/{GROK_VERSION}/grok",
+            OWNER_EXEC_MODE,
+        ),
+        (software_stamp_path(target), SOFTWARE_STAMP_NAME, OWNER_FILE_MODE),
+    ):
+        if file_path.exists() or file_path.is_symlink():
+            info = require_software_regular_file(file_path, label, max_bytes=SOFTWARE_MAX_BYTES)
+            if stat.S_IMODE(info.st_mode) != mode:
+                fail(f"{label} must have mode {mode:04o}")
+
+
+def run_vendor_installer(
+    installer: bytes, installer_source: str, installer_sha256: str, target: Path
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target.name}.nddev-grok-build-installer.", dir=str(target.parent)
+    ) as stage_raw:
+        stage = Path(stage_raw)
+        home = stage / "home"
+        bin_dir = stage / "bin"
+        grok_home = stage / "grok-home"
+        tmp_dir = stage / "tmp"
+        for directory in (home, bin_dir, grok_home, tmp_dir):
+            directory.mkdir(mode=OWNER_DIRECTORY_MODE)
+            directory.chmod(OWNER_DIRECTORY_MODE)
+        installer_path = stage / "install.sh"
+        installer_path.write_bytes(installer)
+        installer_path.chmod(OWNER_EXEC_MODE)
+        env = minimal_process_env(str(bin_dir), tmp_dir=tmp_dir)
+        env.update(
+            {
+                "HOME": str(home),
+                "GROK_HOME": str(grok_home),
+                "GROK_BIN_DIR": str(bin_dir),
+                "GROK_CHANNEL": "stable",
+                "SHELL": "",
+            }
+        )
+        try:
+            completed = subprocess.run(
+                ["bash", str(installer_path), GROK_VERSION],
+                cwd=stage,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=internal_timeout_seconds(INTERNAL_INSTALLER_TIMEOUT_ENV, 120.0),
+            )
+        except FileNotFoundError as exc:
+            missing = exc.filename or "bash"
+            fail(f"Grok Build vendor installer runner is missing: {missing}")
+        except subprocess.TimeoutExpired:
+            fail("Grok Build vendor installer timed out")
+        if completed.returncode != 0:
+            fail(
+                "Grok Build vendor installer failed: "
+                + (completed.stderr or completed.stdout).strip()
+            )
+        staging_binary = bin_dir / GROK_COMMAND
+        stage_resolved = stage.resolve(strict=True)
+        resolved_binary = staging_binary.resolve(strict=True)
+        if stage_resolved not in resolved_binary.parents:
+            fail("Grok Build installer binary escaped the staging directory")
+        binary = read_software_file(resolved_binary, f"Grok Build staging binary {resolved_binary}")
+        probe_env = minimal_process_env(str(bin_dir), tmp_dir=tmp_dir)
+        probe_env["HOME"] = str(stage / "probe-home")
+        Path(probe_env["HOME"]).mkdir(mode=OWNER_DIRECTORY_MODE)
+        try:
+            probe = subprocess.run(
+                [str(resolved_binary), "--version"],
+                cwd=stage,
+                env=probe_env,
+                text=True,
+                input="",
+                capture_output=True,
+                check=False,
+                timeout=internal_timeout_seconds(INTERNAL_PROBE_TIMEOUT_ENV, 15.0),
+            )
+        except FileNotFoundError as exc:
+            missing = exc.filename or str(resolved_binary)
+            fail(f"Grok Build version probe executable is missing: {missing}")
+        except subprocess.TimeoutExpired:
+            fail("Grok Build version probe timed out")
+        version_output = (probe.stdout + probe.stderr).strip()
+        if probe.returncode != 0 or GROK_VERSION not in version_output:
+            fail("Grok Build staging binary did not report the pinned version")
+        return {
+            "binary": binary,
+            "binary_sha256": sha256_bytes(binary),
+            "installer_source": installer_source,
+            "installer_sha256": installer_sha256,
+            "version_output": version_output,
+        }
+
+
+def install_grok_software(target: Path, command: str) -> dict[str, Any]:
+    with target_lock(target):
+        before_target_exists = target.exists() or target.is_symlink()
+        validate_target(target, create=True)
+        try:
+            require_private_directory(target, "target")
+            status = software_status(target)
+            if command == "install-cli" and status["present"]:
+                fail(
+                    "install-cli requires absent target-owned Grok Build software presence; use update-cli"
+                )
+            if command == "update-cli" and not status["present"]:
+                fail("update-cli requires existing target-owned Grok Build software presence")
+            if command == "update-cli" and status["current"]:
+                return {
+                    "schema_version": 1,
+                    "command": command,
+                    "operation": "current",
+                    "target": str(validate_target(target, create=False)),
+                    "version": GROK_VERSION,
+                    "current": True,
+                    "changed": [],
+                    "managed_command": str(managed_grok_path(target).resolve(strict=False)),
+                }
+            validate_safe_software_presence(target)
+            before_container_exists = (
+                software_container(target).exists() or software_container(target).is_symlink()
+            )
+            before_root_exists = (
+                software_root(target).exists() or software_root(target).is_symlink()
+            )
+            before_versions_exists = (
+                software_versions_dir(target).exists() or software_versions_dir(target).is_symlink()
+            )
+            before_version_exists = (
+                software_version_dir(target).exists() or software_version_dir(target).is_symlink()
+            )
+            before_bin_dir_exists = (
+                managed_grok_path(target).parent.exists()
+                or managed_grok_path(target).parent.is_symlink()
+            )
+            before_binary, before_binary_mode = snapshot_optional_software_file(
+                managed_grok_path(target), "bin/grok"
+            )
+            before_stamp, before_stamp_mode = snapshot_optional_software_file(
+                software_stamp_path(target), SOFTWARE_STAMP_NAME
+            )
+            installer, installer_sha256, installer_source = read_pinned_installer()
+            artifact = run_vendor_installer(installer, installer_source, installer_sha256, target)
+            stamp_bytes = canonical_json(
+                software_stamp(
+                    target,
+                    installer_source=artifact["installer_source"],
+                    installer_sha256=artifact["installer_sha256"],
+                    binary_sha256=artifact["binary_sha256"],
+                    version_output=artifact["version_output"],
+                )
+            )
+            staging: Path | None = None
+            rollback_parent: Path | None = None
+            rollback: Path | None = None
+            version_dir = software_version_dir(target)
+            try:
+                ensure_private_directory(software_container(target), ".nddev-software")
+                ensure_private_directory(software_root(target), ".nddev-software/grok-build")
+                ensure_private_directory(
+                    software_versions_dir(target), ".nddev-software/grok-build/versions"
+                )
+                if before_version_exists:
+                    require_private_directory(
+                        version_dir, f".nddev-software/grok-build/versions/{GROK_VERSION}"
+                    )
+                staging = Path(
+                    tempfile.mkdtemp(prefix=".stage-", dir=str(software_versions_dir(target)))
+                )
+                rollback_parent = Path(
+                    tempfile.mkdtemp(prefix=".rollback-", dir=str(software_versions_dir(target)))
+                )
+                rollback = rollback_parent / GROK_VERSION
+                software_atomic_write(
+                    staging / GROK_COMMAND, artifact["binary"], target, OWNER_EXEC_MODE
+                )
+                if before_version_exists:
+                    version_dir.rename(rollback)
+                staging.rename(version_dir)
+                if os.environ.get(INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV) == "1":
+                    fail("injected failure after Grok Build version swap")
+                software_atomic_write(
+                    managed_grok_path(target), artifact["binary"], target, OWNER_EXEC_MODE
+                )
+                if os.environ.get(INTERNAL_FAIL_AFTER_BINARY_SWAP_ENV) == "1":
+                    fail("injected failure after Grok Build binary swap")
+                software_atomic_write(
+                    software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
+                )
+                final_status = software_status(target)
+                if not final_status["installed"]:
+                    fail(
+                        "Grok Build software install did not produce structurally complete target-owned software"
+                    )
+                if installer_source == INSTALLER_URL:
+                    if not final_status["current"]:
+                        fail("Grok Build software install did not produce current pinned software")
+                else:
+                    structural = [
+                        item
+                        for item in final_status["drift"]
+                        if item not in {"installer_url", "installer_sha256"}
+                    ]
+                    if structural:
+                        fail(
+                            "Grok Build test installer produced structural drift: "
+                            + ", ".join(structural)
+                        )
+            except BaseException:
+                if version_dir.exists() or version_dir.is_symlink():
+                    if version_dir.is_dir() and not version_dir.is_symlink():
+                        shutil.rmtree(version_dir)
+                    else:
+                        version_dir.unlink()
+                if rollback is not None and rollback.exists():
+                    rollback.rename(version_dir)
+                if before_binary is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        managed_grok_path(target).unlink()
+                else:
+                    software_atomic_write(
+                        managed_grok_path(target),
+                        before_binary,
+                        target,
+                        before_binary_mode or OWNER_EXEC_MODE,
+                    )
+                if before_stamp is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        software_stamp_path(target).unlink()
+                else:
+                    software_atomic_write(
+                        software_stamp_path(target),
+                        before_stamp,
+                        target,
+                        before_stamp_mode or OWNER_FILE_MODE,
+                    )
+                if staging is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        shutil.rmtree(staging)
+                if rollback_parent is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        shutil.rmtree(rollback_parent)
+                remove_empty_directory_if_created(
+                    managed_grok_path(target).parent, before_bin_dir_exists
+                )
+                remove_empty_directory_if_created(
+                    software_versions_dir(target), before_versions_exists
+                )
+                remove_empty_directory_if_created(software_root(target), before_root_exists)
+                remove_empty_directory_if_created(
+                    software_container(target), before_container_exists
+                )
+                raise
+            if rollback_parent is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    shutil.rmtree(rollback_parent)
+            final_status = software_status(target)
+            return {
+                "schema_version": 1,
+                "command": command,
+                "operation": "install" if command == "install-cli" else "update",
+                "target": str(validate_target(target, create=False)),
+                "version": GROK_VERSION,
+                "current": final_status["current"],
+                "changed": [
+                    "bin/grok",
+                    f".nddev-software/grok-build/versions/{GROK_VERSION}/grok",
+                    f".nddev-software/grok-build/{SOFTWARE_STAMP_NAME}",
+                ],
+                "installer_sha256": artifact["installer_sha256"],
+                "binary_sha256": artifact["binary_sha256"],
+                "managed_command": str(managed_grok_path(target).resolve(strict=False)),
+            }
+        except BaseException:
+            remove_empty_directory_if_created(target, before_target_exists)
+            raise
+
+
 def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
     status = status_payload(target)
     operation = "install"
@@ -665,33 +1498,40 @@ def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
 
 
 def launch(target: Path, child_args: list[str]) -> int:
-    status = status_payload(target)
-    if not status["managed"]:
-        fail("launch requires a managed target")
-    if status["drift"]:
-        fail(f"managed target has drift: {', '.join(status['drift'])}")
-    setup = load_setup(str(status["setup_id"]))
-    canonical = validate_target(target, create=False)
-    home = canonical / ".nddev-grok-build-runtime" / "home"
-    home.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    child_env: dict[str, str] = {
-        "HOME": str(home),
-        "GROK_HOME": str(canonical),
-        "GROK_DISABLE_AUTOUPDATER": "1",
-        "GROK_SANDBOX": str(setup["sandbox_profile"]),
-        "GROK_SUBAGENTS": "1" if setup["subagents_enabled"] else "0",
-        "GROK_WEB_FETCH": "1" if setup["web_fetch"] else "0",
-        "GROK_MEMORY": "0",
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    }
-    for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT"):
-        value = os.environ.get(name)
-        if value:
-            child_env[name] = value
-    try:
-        completed = subprocess.run(["grok", *child_args], env=child_env, check=False)
-    except FileNotFoundError:
-        fail("grok command was not found on PATH")
+    with target_lock(target):
+        status = status_payload(target)
+        if not status["managed"]:
+            fail("launch requires a managed target")
+        if status["drift"]:
+            fail(f"managed target has drift: {', '.join(status['drift'])}")
+        software = software_status(target)
+        if not software["installed"] or not software["current"]:
+            fail("launch requires current target-owned Grok Build software")
+        setup = load_setup(str(status["setup_id"]))
+        canonical = validate_target(target, create=False)
+        runtime_root = canonical / ".nddev-grok-build-runtime"
+        home = runtime_root / "home"
+        create_missing_directories(missing_directory_chain(home))
+        require_private_directory(runtime_root, "Grok Build runtime root")
+        require_private_directory(home, "Grok Build runtime HOME")
+        executable = managed_grok_path(target)
+        child_env: dict[str, str] = {
+            "HOME": str(home),
+            "GROK_HOME": str(canonical),
+            "GROK_DISABLE_AUTOUPDATER": "1",
+            "GROK_SANDBOX": str(setup["sandbox_profile"]),
+            "GROK_SUBAGENTS": "1" if setup["subagents_enabled"] else "0",
+            "GROK_WEB_FETCH": "1" if setup["web_fetch"] else "0",
+            "GROK_MEMORY": "0",
+            "PATH": SAFE_SYSTEM_PATH,
+        }
+        for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT"):
+            value = os.environ.get(name)
+            if value:
+                child_env[name] = value
+        for name in PROVIDER_SECRET_NAMES:
+            child_env.pop(name, None)
+    completed = subprocess.run([str(executable), *child_args], env=child_env, check=False)
     return int(completed.returncode)
 
 
@@ -700,7 +1540,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--json", action="store_true")
-    for name in ("status", "remove"):
+    for name in ("status", "remove", "software-status", "install-cli", "update-cli"):
         command = subparsers.add_parser(name)
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
@@ -732,6 +1572,9 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "status":
         emit(status_payload(require_absolute_target(args.target)), as_json=args.json)
         return 0
+    if args.command == "software-status":
+        emit(software_status(require_absolute_target(args.target)), as_json=args.json)
+        return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
         emit(plan_payload(target, load_setup(args.setup)), as_json=args.json)
@@ -751,6 +1594,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "remove":
         target = require_absolute_target(args.target)
         emit(remove_setup(target), as_json=args.json)
+        return 0
+    if args.command in {"install-cli", "update-cli"}:
+        target = require_absolute_target(args.target)
+        emit(install_grok_software(target, args.command), as_json=args.json)
         return 0
     if args.command == "launch":
         child_args = list(args.child_args)

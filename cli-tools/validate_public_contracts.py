@@ -22,6 +22,34 @@ REQUIRED_WORKFLOWS = {
     "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
 }
 SETUP_ORDER = ["safe", "balanced", "full-auto"]
+GROK_VERSION = "0.2.112"
+INSTALLER_URL = "https://x.ai/cli/install.sh"
+INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
+SOFTWARE_LIFECYCLE_KEYS = {
+    "command",
+    "credential_inheritance",
+    "discarded_stage_paths",
+    "entrypoint",
+    "install_command",
+    "install_precondition",
+    "installer_sha256",
+    "official_installer",
+    "persisted_stage_paths",
+    "presence_signal",
+    "private_modes",
+    "rollback_on_failure",
+    "software_root",
+    "stage_env",
+    "stamp_file",
+    "stamp_schema",
+    "status_command",
+    "status_executes_binary",
+    "target_owned",
+    "update_command",
+    "update_precondition",
+    "version",
+    "version_probe",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,10 +113,52 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("setup ids are not synchronized")
     if build.get("grok_build_tested") != baseline["release"]["npm_version"]:
         raise ValueError("tested Grok Build version differs from baseline release")
+    if build.get("grok_build_tested") != GROK_VERSION:
+        raise ValueError("tested Grok Build version must be 0.2.112")
     if baseline["runtime"]["command"] != "grok":
         raise ValueError("baseline command must be grok")
+    if baseline["release"].get("official_installer") != INSTALLER_URL:
+        raise ValueError("baseline must pin the official vendor installer")
+    if baseline["release"].get("official_installer_sha256") != INSTALLER_SHA256:
+        raise ValueError("baseline installer SHA-256 mismatch")
+    if baseline["release"].get("module_install_mechanism") != "vendor-installer-only":
+        raise ValueError("baseline must declare vendor-installer-only install")
+    if baseline["release"].get("module_npm_install_supported") is not False:
+        raise ValueError("module must not support npm installation")
     if contract["plugin_marketplace"]["external_marketplace_published"] is not None:
         raise ValueError("external marketplace must remain null until published")
+    runtime = contract.get("runtime_launch", {})
+    if runtime.get("managed_command") != "bin/grok":
+        raise ValueError("runtime launch must use target-owned bin/grok")
+    if runtime.get("path_fallback") is not False:
+        raise ValueError("runtime launch must disable PATH fallback")
+    if runtime.get("requires_current_target_owned_software") is not True:
+        raise ValueError("runtime launch must require current target-owned software")
+    lifecycle = contract.get("software_lifecycle")
+    if not isinstance(lifecycle, dict) or set(lifecycle) != SOFTWARE_LIFECYCLE_KEYS:
+        raise ValueError("contract software_lifecycle keys mismatch")
+    if lifecycle.get("official_installer") != INSTALLER_URL:
+        raise ValueError("software_lifecycle official installer mismatch")
+    if lifecycle.get("installer_sha256") != INSTALLER_SHA256:
+        raise ValueError("software_lifecycle installer SHA-256 mismatch")
+    if lifecycle.get("version") != GROK_VERSION:
+        raise ValueError("software_lifecycle version mismatch")
+    if lifecycle.get("entrypoint") != "bin/grok" or lifecycle.get("command") != "grok":
+        raise ValueError("software_lifecycle must expose only grok")
+    if lifecycle.get("status_executes_binary") is not False:
+        raise ValueError("software-status must not execute the target binary")
+    if "present=true" not in str(lifecycle.get("presence_signal", "")):
+        raise ValueError("software_lifecycle must document present=true")
+    stage_env = lifecycle.get("stage_env")
+    if not isinstance(stage_env, dict) or stage_env.get("TMPDIR") != "<stage>/tmp":
+        raise ValueError("software_lifecycle must bind installer TMPDIR to <stage>/tmp")
+    manifest_lifecycle = manifest.get("software_lifecycle")
+    if not isinstance(manifest_lifecycle, dict):
+        raise ValueError("manifest software_lifecycle missing")
+    if manifest_lifecycle.get("installer_sha256") != INSTALLER_SHA256:
+        raise ValueError("manifest installer SHA-256 mismatch")
+    if manifest_lifecycle.get("version") != GROK_VERSION:
+        raise ValueError("manifest software version mismatch")
     for relative in (
         "builder/nddev-builder/plugin.json",
         "builder/nddev-builder/skills/nddev-builder/SKILL.md",

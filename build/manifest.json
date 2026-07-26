@@ -27,7 +27,10 @@
       "install",
       "switch",
       "restore",
-      "remove"
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli"
     ],
     "target_required": [
       "status",
@@ -36,6 +39,9 @@
       "switch",
       "restore",
       "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
       "launch"
     ],
     "plan_mutates": false,
@@ -43,14 +49,50 @@
   },
   "runtime_launch": {
     "command": "grok",
-    "direct_command": "GROK_HOME=<absolute-target> grok [args...]",
+    "direct_command": "GROK_HOME=<absolute-target> <absolute-target>/bin/grok [args...]",
     "environment_variable": "GROK_HOME",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
     "requires_clean_managed_target": true,
+    "requires_current_target_owned_software": true,
+    "path_fallback": false,
+    "managed_command": "bin/grok",
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112"
+  },
+  "software_lifecycle": {
+    "supported": true,
+    "product_name": "Grok Build",
+    "command": "grok",
+    "version": "0.2.112",
+    "installer_url": "https://x.ai/cli/install.sh",
+    "installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+    "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-target> [--json]",
+    "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-target> [--json]",
+    "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-target> [--json]",
+    "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-GROK-BUILD-SOFTWARE.json, .nddev-software/grok-build, .nddev-software/grok-build/versions/0.2.112, or bin/grok",
+    "install_precondition": "absent target-owned software presence",
+    "update_precondition": "existing safe target-owned software presence, including missing or corrupt identity stamp repair",
+    "target_owned": true,
+    "software_root": ".nddev-software/grok-build/versions/0.2.112",
+    "entrypoint": "bin/grok",
+    "stage_env": {
+      "HOME": "<stage>/home",
+      "GROK_BIN_DIR": "<stage>/bin",
+      "TMPDIR": "<stage>/tmp",
+      "PATH": "<stage>/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    },
+    "status_executes_binary": false,
+    "version_probe": "staging binary only",
+    "persisted_stage_paths": ["bin/grok", ".nddev-software/grok-build/versions/0.2.112/grok"],
+    "discarded_stage_paths": ["shell rc files", "completions", "installer config.toml", "agent alias"],
+    "private_modes": {
+      "directories": "0700",
+      "stamp": "0600",
+      "binary": "0700"
+    },
+    "rollback_on_failure": true
   },
   "backup_policy": {
     "location": "sibling .<target-name>.nddev-grok-build-backups",

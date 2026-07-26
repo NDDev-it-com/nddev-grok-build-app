@@ -57,6 +57,45 @@ PROVIDER_SECRET_NAMES = {
     "XAI_API_KEY",
     "XAI_TOKEN",
 }
+TARGET_SCOPE_FLAGS_WITH_VALUE = {
+    "--allow",
+    "--allowedTools",
+    "--append-system-prompt",
+    "--cwd",
+    "--deny",
+    "--disallowed-tools",
+    "--disallowedTools",
+    "--effort",
+    "--model",
+    "--plugin-dir",
+    "--ref",
+    "--resume",
+    "--rules",
+    "--sandbox",
+    "--session-id",
+    "--system-prompt",
+    "--system-prompt-override",
+    "--tools",
+    "--worktree",
+    "-m",
+    "-r",
+    "-s",
+    "-w",
+}
+TARGET_SCOPE_FLAGS_NO_VALUE = {
+    "--always-approve",
+    "--continue",
+    "--dangerously-skip-permissions",
+    "--disable-web-search",
+    "--experimental-memory",
+    "--fork-session",
+    "--no-memory",
+    "--no-plan",
+    "--no-subagents",
+    "--oauth",
+    "--yolo",
+    "-c",
+}
 CONTENT_MANAGED_PATHS = (
     "config.toml",
     "AGENTS.md",
@@ -1497,7 +1536,24 @@ def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:
+    for arg in child_args:
+        if arg == "--":
+            return None
+        if arg in TARGET_SCOPE_FLAGS_NO_VALUE:
+            return arg
+        if arg in TARGET_SCOPE_FLAGS_WITH_VALUE:
+            return arg
+        for flag in TARGET_SCOPE_FLAGS_WITH_VALUE:
+            if arg.startswith(f"{flag}="):
+                return flag
+    return None
+
+
 def launch(target: Path, child_args: list[str]) -> int:
+    override = child_args_use_target_scope_overrides(child_args)
+    if override is not None:
+        fail(f"launch child arguments must not override target-owned Grok Build scope: {override}")
     with target_lock(target):
         status = status_payload(target)
         if not status["managed"]:
@@ -1511,9 +1567,12 @@ def launch(target: Path, child_args: list[str]) -> int:
         canonical = validate_target(target, create=False)
         runtime_root = canonical / ".nddev-grok-build-runtime"
         home = runtime_root / "home"
+        tmp = runtime_root / "tmp"
         create_missing_directories(missing_directory_chain(home))
+        create_missing_directories(missing_directory_chain(tmp))
         require_private_directory(runtime_root, "Grok Build runtime root")
         require_private_directory(home, "Grok Build runtime HOME")
+        require_private_directory(tmp, "Grok Build runtime TMPDIR")
         executable = managed_grok_path(target)
         child_env: dict[str, str] = {
             "HOME": str(home),
@@ -1524,8 +1583,9 @@ def launch(target: Path, child_args: list[str]) -> int:
             "GROK_WEB_FETCH": "1" if setup["web_fetch"] else "0",
             "GROK_MEMORY": "0",
             "PATH": SAFE_SYSTEM_PATH,
+            "TMPDIR": str(tmp),
         }
-        for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT"):
+        for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"):
             value = os.environ.get(name)
             if value:
                 child_env[name] = value

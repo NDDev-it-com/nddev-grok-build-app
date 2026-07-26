@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "observed_at": "2026-07-26",
+  "observed_at": "2026-07-27",
   "product": {
     "name": "Grok Build",
     "vendor": "xAI",
@@ -45,9 +45,9 @@
   "source_repository": {
     "url": "https://github.com/xai-org/grok-build",
     "default_branch": "main",
-    "main_commit": "47348d13ec4508dcfe440e34c6d511bb02998fb2",
-    "source_rev": "d02693a856a54f1030695b36b91d276e96b30b23",
-    "pushed_at": "2026-07-25T18:44:46Z",
+    "main_commit": "b41c75a578f98bddbd326ab02cd53618451d97ee",
+    "source_rev": "b41c75a578f98bddbd326ab02cd53618451d97ee",
+    "pushed_at": "2026-07-26T20:58:13Z",
     "release_tags_observed": []
   },
   "official_sources": [
@@ -97,7 +97,6 @@
     }
   ],
   "unsupported": {
-    "old_grok_cli_identity": null,
     "external_nddev_builder_marketplace": null,
     "native_binary_delivery_by_plugins": null
   }

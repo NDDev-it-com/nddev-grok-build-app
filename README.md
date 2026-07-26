@@ -19,7 +19,7 @@ python3 cli-tools/nddev_grok_build.py remove --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py software-status --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home -- --no-auto-update
+python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home -- -p "Explain this repo"
 ```
 
 `install-cli` and `update-cli` install target-owned Grok Build `0.2.112` through
@@ -31,9 +31,11 @@ software stamp. Staged shell rc files, completions, installer `config.toml`, and
 the vendor `agent` alias are discarded.
 
 `launch` executes only the target-owned `<target>/bin/grok` with
-`GROK_HOME=<target>`, a target-local child `HOME`, auto-updates disabled for the
-process, and provider credentials stripped from the inherited environment. It
-never falls back to `PATH`.
+`GROK_HOME=<target>`, target-local child `HOME` and `TMPDIR`, auto-updates
+disabled for the process, and provider credentials stripped from the inherited
+environment. It rejects documented Grok Build flags that override managed
+target, session, model, permission, sandbox, tool, or plugin scope and never
+falls back to `PATH`.
 
 ## Setups
 

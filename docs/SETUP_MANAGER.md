@@ -47,7 +47,9 @@ identity stamp. Symlink, hardlink, wrong-type, non-private mode, and escaping
 paths fail closed before installer download or execution.
 
 `launch` requires both a clean managed setup and current target-owned software.
-It executes only `<target>/bin/grok` and never falls back to `PATH`.
+It executes only `<target>/bin/grok`, binds child `HOME` and `TMPDIR` under the
+target runtime directory, rejects documented Grok Build scope override flags,
+and never falls back to `PATH`.
 
 ## Unsupported Capabilities
 

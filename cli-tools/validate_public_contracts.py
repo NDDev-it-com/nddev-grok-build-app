@@ -19,7 +19,7 @@ REQUIRED_WORKFLOWS = {
     "release.yml": ".github/workflows/release-supply-chain.yml",
     "scorecard.yml": ".github/workflows/public-scorecard-json.yml",
     "secret-scan.yml": ".github/workflows/secret-scan.yml",
-    "zizmor.yml": ".github/workflows/zizmor-sarif.yml"
+    "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
 }
 SETUP_ORDER = ["safe", "balanced", "full-auto"]
 
@@ -55,7 +55,9 @@ def validate_workflows() -> None:
         path = workflow_root / filename
         if not path.is_file():
             raise ValueError(f"missing workflow {path.relative_to(ROOT)}")
-        expected = f"uses: NDDev-it-com/ci-workflows/{workflow}@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+        expected = (
+            f"uses: NDDev-it-com/ci-workflows/{workflow}@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+        )
         text = path.read_text(encoding="utf-8")
         if text.count(expected) != 1:
             raise ValueError(f"{filename}: missing exact shared CI caller")

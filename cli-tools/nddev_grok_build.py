@@ -13,7 +13,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, NoReturn
@@ -160,7 +159,9 @@ def ensure_real_parent(path: Path, target: Path) -> None:
             fail(f"managed parent is not a directory: {current}")
 
 
-def require_existing_managed_file(path: Path, label: str, *, max_bytes: int) -> os.stat_result | None:
+def require_existing_managed_file(
+    path: Path, label: str, *, max_bytes: int
+) -> os.stat_result | None:
     info = stat_existing(path, label)
     if info is None:
         return None
@@ -497,8 +498,7 @@ def create_backup(target: Path, stamp: dict[str, Any]) -> int:
 
 def build_stamp(target: Path, setup_id: str, files: dict[str, bytes]) -> dict[str, Any]:
     managed = {
-        relative: managed_digest_for_bytes(relative, data)
-        for relative, data in files.items()
+        relative: managed_digest_for_bytes(relative, data) for relative, data in files.items()
     }
     return {
         "schema_version": 1,
@@ -510,7 +510,9 @@ def build_stamp(target: Path, setup_id: str, files: dict[str, bytes]) -> dict[st
     }
 
 
-def write_setup(target: Path, setup: dict[str, Any], *, require_existing: bool = False) -> dict[str, Any]:
+def write_setup(
+    target: Path, setup: dict[str, Any], *, require_existing: bool = False
+) -> dict[str, Any]:
     with target_lock(target):
         validate_target(target, create=True)
         current = read_stamp(target)
@@ -523,7 +525,8 @@ def write_setup(target: Path, setup: dict[str, Any], *, require_existing: bool =
         files = desired_files(target, setup)
         desired_stamp = build_stamp(target, setup["id"], files)
         changed = [
-            relative for relative, data in files.items()
+            relative
+            for relative, data in files.items()
             if current_managed_digest(target, relative) != managed_digest_for_bytes(relative, data)
         ]
         backup_slot = None
@@ -608,7 +611,10 @@ def remove_setup(target: Path) -> dict[str, Any]:
         except BaseException:
             restore_snapshot(target, snapshot)
             raise
-        return {"removed_setup_id": removed_setup_id, "target": str(validate_target(target, create=False))}
+        return {
+            "removed_setup_id": removed_setup_id,
+            "target": str(validate_target(target, create=False)),
+        }
 
 
 def remove_managed_block_from_target(target: Path, relative: str) -> None:

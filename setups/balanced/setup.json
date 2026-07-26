@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "balanced",
+  "display_name": "Balanced",
+  "description": "Grok Build auto permission mode with the workspace sandbox, retained deny rules, and subagents enabled.",
+  "permission_mode": "auto",
+  "sandbox_profile": "workspace",
+  "web_fetch": false,
+  "write_file": true,
+  "lsp_tools": false,
+  "subagents_enabled": true,
+  "tool_search": true,
+  "permission_deny": [
+    "Bash(rm -rf *)",
+    "Bash(git push *)",
+    "Bash(gh release *)",
+    "Read(**/.env)",
+    "Read(**/*.pem)",
+    "Read(**/id_rsa)",
+    "Read(**/id_ed25519)"
+  ],
+  "permission_ask": [
+    "Bash(git push *)",
+    "Bash(gh release *)"
+  ],
+  "nddev_builder_default": true
+}

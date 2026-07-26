@@ -1,10 +1,110 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "product_name": "nddev-grok-build-app",
+  "display_name": "NDDev Grok Build Setup Manager",
+  "description": "Portable, explicit-target setup manager for current Grok Build configuration, native builder capability projection, isolated launch, and target-bound lifecycle backups.",
   "github_repository": "NDDev-it-com/nddev-grok-build-app",
   "license": "AGPL-3.0-or-later",
-  "skeleton": {
-    "status": "skeleton",
-    "harness_id": "grok-build"
+  "manifest_ref": "build/manifest.json",
+  "version_ref": "build/version.json",
+  "source_root": "setups",
+  "setup_system": {
+    "catalog_root": "setups",
+    "identity_source": "<setup>/setup.json:id",
+    "setup_ids": [
+      "safe",
+      "balanced",
+      "full-auto"
+    ],
+    "list_command": "python3 cli-tools/nddev_grok_build.py list [--json]",
+    "status_command": "python3 cli-tools/nddev_grok_build.py status --target <absolute-dir> [--json]",
+    "plan_command": "python3 cli-tools/nddev_grok_build.py plan --setup <id> --target <absolute-dir> [--json]",
+    "install_command": "python3 cli-tools/nddev_grok_build.py install --setup <id> --target <absolute-dir> [--json]",
+    "switch_command": "python3 cli-tools/nddev_grok_build.py switch --setup <id> --target <absolute-dir> [--json]",
+    "restore_command": "python3 cli-tools/nddev_grok_build.py restore --backup <0..9> --target <absolute-dir> [--json]",
+    "remove_command": "python3 cli-tools/nddev_grok_build.py remove --target <absolute-dir> [--json]",
+    "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> -- [args...]"
+  },
+  "managed_state": {
+    "environment_variable": "GROK_HOME",
+    "default_target": null,
+    "stamp_file": "NDDEV-GROK-BUILD-SETUP.json",
+    "stamp_schema": 1,
+    "managed_file_mode": "0600",
+    "managed_directory_mode": "0700",
+    "preserve_other_state": true,
+    "co_owned_config_strategy": "replace-managed-marker-block-only"
+  },
+  "safety": {
+    "absolute_target_required": true,
+    "canonical_target_binding": true,
+    "relative_target_rejected": true,
+    "target_symlinks_rejected": true,
+    "managed_symlinks_rejected": true,
+    "managed_hardlinks_rejected": true,
+    "bounded_managed_reads": true,
+    "max_backups": 10,
+    "rollback_on_failure": true,
+    "launch_requires_clean_managed_target": true,
+    "launch_strips_provider_credentials": true
+  },
+  "runtime_launch": {
+    "command": "grok",
+    "direct_command": "GROK_HOME=<absolute-target> grok [args...]",
+    "environment_variable": "GROK_HOME",
+    "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> -- [args...]",
+    "forwards_arguments": true,
+    "forwards_child_exit_code": true,
+    "streams_child_stdio": true,
+    "target_environment_scope": "child-process-only",
+    "required_version": "0.2.112",
+    "json_manager_errors_supported": true
+  },
+  "permission_defaults": {
+    "safe": {
+      "permission_mode": "ask",
+      "sandbox_profile": "strict"
+    },
+    "balanced": {
+      "permission_mode": "auto",
+      "sandbox_profile": "workspace"
+    },
+    "full-auto": {
+      "permission_mode": "always-approve",
+      "sandbox_profile": "workspace"
+    }
+  },
+  "plugin_marketplace": {
+    "plugin_id": "nddev-builder",
+    "plugin_manifest": "builder/nddev-builder/plugin.json",
+    "builder_enabled_in_base_config": true,
+    "default_on_in_all_setups": true,
+    "native_projection": {
+      "user_skill": "$GROK_HOME/skills/nddev-builder/SKILL.md",
+      "user_agent": "$GROK_HOME/agents/nddev-builder.md",
+      "trusted_user_plugin": "$GROK_HOME/plugins/nddev-builder",
+      "plugin_skill": "$GROK_HOME/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+      "plugin_agent": "$GROK_HOME/plugins/nddev-builder/agents/nddev-builder.md",
+      "config_enablement": "[plugins].enabled = [\"nddev-builder\"]"
+    },
+    "external_marketplace_published": null,
+    "marketplace_manifest": null,
+    "unsupported_reason": "No NDDev external Grok marketplace source is published by this module; the builder is projected through documented local trusted plugin and skill surfaces."
+  },
+  "runtime_compatibility": {
+    "baseline_ref": "references/grok-build-baseline.json",
+    "version_ref": "build/version.json",
+    "official_docs": {
+      "overview": "https://docs.x.ai/build/overview",
+      "cli": "https://docs.x.ai/build/cli/reference",
+      "settings": "https://docs.x.ai/build/settings",
+      "settings_reference": "https://docs.x.ai/build/settings/reference",
+      "permissions": "https://docs.x.ai/build/features/permissions",
+      "sandbox": "https://docs.x.ai/build/features/sandbox",
+      "skills_plugins_marketplaces": "https://docs.x.ai/build/features/skills-plugins-marketplaces",
+      "project_rules": "https://docs.x.ai/build/features/project-rules",
+      "enterprise": "https://docs.x.ai/build/enterprise",
+      "source": "https://x.ai/open-source"
+    }
   }
 }

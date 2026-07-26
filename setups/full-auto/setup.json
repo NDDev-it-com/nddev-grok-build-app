@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "display_name": "Full Auto",
+  "description": "Grok Build always-approve mode paired with the workspace sandbox and explicit deny rules.",
+  "permission_mode": "always-approve",
+  "sandbox_profile": "workspace",
+  "web_fetch": true,
+  "write_file": true,
+  "lsp_tools": true,
+  "subagents_enabled": true,
+  "tool_search": true,
+  "permission_deny": [
+    "Bash(rm -rf *)",
+    "Bash(git push *)",
+    "Bash(gh release *)",
+    "Read(**/.env)",
+    "Read(**/*.pem)",
+    "Read(**/id_rsa)",
+    "Read(**/id_ed25519)"
+  ],
+  "permission_ask": [],
+  "nddev_builder_default": true
+}

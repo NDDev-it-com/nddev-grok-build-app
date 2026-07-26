@@ -3,6 +3,8 @@
   "product_name": "nddev-grok-cli-app",
   "github_repository": "NDDev-it-com/nddev-grok-cli-app",
   "license": "AGPL-3.0-or-later",
-  "status": "skeleton",
-  "harness_id": "grok-cli"
+  "skeleton": {
+    "status": "skeleton",
+    "harness_id": "grok-cli"
+  }
 }

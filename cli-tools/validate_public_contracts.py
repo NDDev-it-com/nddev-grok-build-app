@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -45,6 +48,7 @@ SOFTWARE_LIFECYCLE_KEYS = {
     "credential_inheritance",
     "discarded_stage_paths",
     "entrypoint",
+    "fetch_errors_are_domain_errors",
     "install_command",
     "install_precondition",
     "installer_exact_version_arg",
@@ -204,6 +208,173 @@ def install_stub_software(manager: Any, target: Path, body: bytes) -> str:
     return digest
 
 
+def target_managed_bytes(manager: Any, target: Path) -> dict[str, bytes | None]:
+    stamp = manager.read_stamp(target)
+    if stamp is None:
+        raise ValueError("expected managed target")
+    paths = sorted({*stamp["managed_files"], manager.STAMP_NAME})
+    values: dict[str, bytes | None] = {}
+    for relative in paths:
+        path = manager.safe_target_path(target, relative)
+        values[relative] = path.read_bytes() if path.exists() else None
+    return values
+
+
+def assert_target_bytes(manager: Any, target: Path, expected: dict[str, bytes | None]) -> None:
+    if target_managed_bytes(manager, target) != expected:
+        raise ValueError("restore failure did not preserve byte-identical managed state")
+    status = manager.status_payload(target)
+    if status["drift"]:
+        raise ValueError("restore failure left managed drift")
+
+
+def write_backup_envelope(manager: Any, envelope_path: Path, envelope: dict[str, Any]) -> None:
+    envelope_path.write_text(
+        json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    envelope_path.chmod(manager.OWNER_FILE_MODE)
+
+
+def encoded_json(value: dict[str, Any]) -> str:
+    return base64.b64encode(
+        (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    ).decode("ascii")
+
+
+def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, Any]) -> None:
+    safe_profile = manager.load_profile("safe")
+    switch = manager.write_setup(target, setup, safe_profile, require_existing=True)
+    slot = switch["backup_slot"]
+    if slot is None:
+        raise ValueError("profile switch did not create a backup")
+    envelope_path = manager.backup_envelope_path(target, int(slot))
+    original_bytes = envelope_path.read_bytes()
+
+    def variant(mutator: Any, expected: str) -> None:
+        envelope = json.loads(original_bytes.decode("utf-8"))
+        mutator(envelope)
+        write_backup_envelope(manager, envelope_path, envelope)
+        before = target_managed_bytes(manager, target)
+        expect_manager_error(manager, lambda: manager.restore_backup(target, int(slot)), expected)
+        assert_target_bytes(manager, target, before)
+        envelope_path.write_bytes(original_bytes)
+        envelope_path.chmod(manager.OWNER_FILE_MODE)
+
+    def corrupt_base64(envelope: dict[str, Any]) -> None:
+        envelope["files"]["config.toml"] = "!!!!"
+
+    def corrupt_digest(envelope: dict[str, Any]) -> None:
+        payload = base64.b64decode(
+            envelope["files"]["config.toml"].encode("ascii"), validate=True
+        )
+        marker = manager.MANAGED_BEGIN.encode("utf-8")
+        if marker not in payload:
+            raise ValueError("config.toml backup is missing the managed marker")
+        envelope["files"]["config.toml"] = base64.b64encode(
+            payload.replace(marker, marker + b"\n# corrupt", 1)
+        ).decode("ascii")
+
+    def missing_path(envelope: dict[str, Any]) -> None:
+        del envelope["files"]["config.toml"]
+
+    def extra_path(envelope: dict[str, Any]) -> None:
+        envelope["files"]["unmanaged.txt"] = base64.b64encode(b"extra").decode("ascii")
+
+    def wrong_scalar(envelope: dict[str, Any]) -> None:
+        envelope["slot"] = str(slot)
+
+    def extra_stamp_path(envelope: dict[str, Any]) -> None:
+        stamp = json.loads(
+            base64.b64decode(
+                envelope["files"][manager.STAMP_NAME].encode("ascii"), validate=True
+            ).decode("utf-8")
+        )
+        payload = b"managed by forged stamp\n"
+        stamp["managed_files"]["unmanaged.txt"] = hashlib.sha256(payload).hexdigest()
+        envelope["files"][manager.STAMP_NAME] = encoded_json(stamp)
+        envelope["files"]["unmanaged.txt"] = base64.b64encode(payload).decode("ascii")
+
+    variant(corrupt_base64, "valid base64")
+    variant(corrupt_digest, "digest mismatch")
+    variant(missing_path, "file set")
+    variant(extra_path, "file set")
+    variant(wrong_scalar, "slot is invalid")
+    variant(extra_stamp_path, "managed path set")
+
+    restored = manager.restore_backup(target, int(slot))
+    if restored["profile_id"] != "full-auto":
+        raise ValueError("valid restore did not restore the backed-up profile")
+    if manager.status_payload(target)["drift"]:
+        raise ValueError("valid restore left managed drift")
+
+
+def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> None:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        rc = manager.main(argv)
+    if rc != 2:
+        raise ValueError(f"expected manager rc=2, got {rc}")
+    payload = json.loads(output.getvalue())
+    if expected not in str(payload.get("error", "")):
+        raise ValueError(f"unexpected manager JSON error: {payload}")
+
+
+def validate_fetch_error_smokes(manager: Any) -> None:
+    original_urlopen = manager.urllib.request.urlopen
+
+    class BadResponse:
+        headers = {"Content-Length": "not-an-int"}
+
+        def __enter__(self) -> "BadResponse":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def read(self, size: int) -> bytes:
+            return b""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="nddev-grok-build-fetch-") as tmp_raw:
+            target = Path(tmp_raw) / "grok-home"
+
+            def offline(*args: Any, **kwargs: Any) -> Any:
+                raise OSError("offline")
+
+            manager.urllib.request.urlopen = offline
+            expect_manager_main_error(
+                manager,
+                ["install-cli", "--target", str(target), "--json"],
+                "fetch failed",
+            )
+            if target.exists():
+                raise ValueError("failed install-cli did not remove the newly created target")
+
+            manager.urllib.request.urlopen = lambda *args, **kwargs: BadResponse()
+            expect_manager_main_error(
+                manager,
+                ["install-cli", "--target", str(target), "--json"],
+                "Content-Length",
+            )
+            if target.exists():
+                raise ValueError("failed install-cli did not remove the newly created target")
+
+            def interrupted(*args: Any, **kwargs: Any) -> Any:
+                raise KeyboardInterrupt
+
+            manager.urllib.request.urlopen = interrupted
+            try:
+                manager.read_pinned_installer()
+            except KeyboardInterrupt:
+                pass
+            except BaseException as exc:
+                raise ValueError("installer fetch must preserve KeyboardInterrupt") from exc
+            else:
+                raise ValueError("installer fetch did not raise KeyboardInterrupt")
+    finally:
+        manager.urllib.request.urlopen = original_urlopen
+
+
 def validate_adversarial_smokes(manager: Any) -> None:
     setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
     profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
@@ -234,6 +405,8 @@ def validate_adversarial_smokes(manager: Any) -> None:
         status = manager.status_payload(target)
         if status["launchable"] or status.get("software_current") is not False:
             raise ValueError("status launchable must be false without current software")
+
+        validate_restore_backup_smokes(manager, target, setup)
 
         denied = (
             ["update"],
@@ -442,6 +615,13 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest backup_policy missing")
     if backup_policy.get("location") != "$GROK_HOME/.nddev-grok-build/backups":
         raise ValueError("manifest backup policy must be target-internal")
+    for key in (
+        "strict_envelope_validation",
+        "base64_validate",
+        "restored_stamp_path_set_validated",
+    ):
+        if backup_policy.get(key) is not True:
+            raise ValueError(f"manifest backup_policy must set {key}=true")
     transaction = manifest.get("transaction_policy")
     if not isinstance(transaction, dict):
         raise ValueError("manifest transaction_policy missing")
@@ -451,6 +631,13 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest lock must be target-internal")
     if transaction.get("launch_requires_current_software") is not True:
         raise ValueError("manifest must require current software for launch")
+    for key in (
+        "restore_prevalidates_backup_before_mutation",
+        "restore_post_validates_clean_state",
+        "restore_rollback_byte_identical_on_failure",
+    ):
+        if transaction.get(key) is not True:
+            raise ValueError(f"manifest transaction_policy must set {key}=true")
     if transaction.get("launch_uses_verified_private_image") is not True:
         raise ValueError("manifest must require verified private launch image")
     if "same user" not in str(
@@ -471,6 +658,11 @@ def main(argv: list[str] | None = None) -> int:
         "existing_target_private_mode_required",
         "sibling_lock_and_backup_state_ignored",
         "legacy_sibling_backups_read_only_when_strictly_validated",
+        "restore_validates_backup_envelope_before_mutation",
+        "restore_validates_stamp_path_set_and_digests",
+        "restore_post_validates_clean_state",
+        "restore_rollback_byte_identical_on_failure",
+        "installer_fetch_errors_are_domain_errors",
         "launch_requires_current_target_owned_software",
         "launch_uses_verified_private_image",
         "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations",
@@ -536,6 +728,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("software_lifecycle must expose only grok")
     if lifecycle.get("status_executes_binary") is not False:
         raise ValueError("software-status must not execute the target binary")
+    if lifecycle.get("fetch_errors_are_domain_errors") is not True:
+        raise ValueError("software_lifecycle must normalize fetch errors")
     if "present=true" not in str(lifecycle.get("presence_signal", "")):
         raise ValueError("software_lifecycle must document present=true")
     stage_env = lifecycle.get("stage_env")
@@ -568,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
     validate_adversarial_smokes(manager)
+    validate_fetch_error_smokes(manager)
     validate_workflows()
     print("validate_public_contracts.py: PASS")
     return 0

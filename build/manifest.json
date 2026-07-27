@@ -136,6 +136,7 @@
     },
     "status_executes_binary": false,
     "version_probe": "staging binary only",
+    "fetch_errors_are_domain_errors": true,
     "persisted_stage_paths": ["bin/grok", ".nddev-software/grok-build/versions/0.2.112/grok"],
     "discarded_stage_paths": ["shell rc files", "completions", "installer config.toml", "agent alias"],
     "private_modes": {
@@ -190,7 +191,10 @@
     "legacy_sibling_restore": "read only after strict owner, mode, and canonical-target validation",
     "envelope": "NDDEV-GROK-BUILD-BACKUP.json",
     "slots": 10,
-    "canonical_target_bound": true
+    "canonical_target_bound": true,
+    "strict_envelope_validation": true,
+    "base64_validate": true,
+    "restored_stamp_path_set_validated": true
   },
   "transaction_policy": {
     "absolute_target_required": true,
@@ -205,6 +209,9 @@
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
     "lock": "$GROK_HOME/.nddev-grok-build/lock",
+    "restore_prevalidates_backup_before_mutation": true,
+    "restore_post_validates_clean_state": true,
+    "restore_rollback_byte_identical_on_failure": true,
     "launch_requires_current_software": true,
     "launch_uses_verified_private_image": true,
     "same_uid_malicious_mutation_boundary": "same user malicious mutation is outside cross-user isolation boundary"

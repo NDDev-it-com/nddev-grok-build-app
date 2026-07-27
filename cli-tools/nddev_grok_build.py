@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -16,6 +18,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, NoReturn
@@ -132,9 +135,45 @@ MUTATING_LAUNCH_NESTED_SUBCOMMANDS = {
     ("plugin", "marketplace"): {"add", "remove", "update"},
 }
 BASE_MANAGED_PATHS = ("config.toml", "AGENTS.md")
+LEGACY_MANAGED_PATHS = (
+    "config.toml",
+    "AGENTS.md",
+    "skills/nddev-builder/SKILL.md",
+    "agents/nddev-builder.md",
+    "plugins/nddev-builder/plugin.json",
+    "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    "plugins/nddev-builder/agents/nddev-builder.md",
+)
 MERGED_MARKER_PATHS = {"config.toml", "AGENTS.md"}
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SUPPORTED_PLATFORM_SYSTEMS = {"Darwin", "Linux"}
+STAMP_KEYS_V1 = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "setup_id",
+    "canonical_target",
+    "managed_files",
+}
+STAMP_KEYS_V2 = {*STAMP_KEYS_V1, "profile_id"}
+BACKUP_ENVELOPE_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "slot",
+    "canonical_target",
+    "source_setup_id",
+    "source_profile_id",
+    "source_stamp_schema",
+    "created_at",
+    "files",
+}
+FORBIDDEN_MANAGED_PATH_ROOTS = {
+    CONTROL_DIR_NAME,
+    ".nddev-grok-build-runtime",
+    ".nddev-software",
+}
 
 
 class GrokBuildSetupError(Exception):
@@ -318,6 +357,7 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
 @contextlib.contextmanager
 def target_lock(target: Path, *, create: bool):
     created_parent_chain = missing_directory_chain(target.parent)
+    remove_empty_target = create and not (target.exists() or target.is_symlink())
     locked = False
     path: Path | None = None
     try:
@@ -338,6 +378,8 @@ def target_lock(target: Path, *, create: bool):
             with contextlib.suppress(FileNotFoundError):
                 path.rmdir()
         prune_empty_control_dirs(target)
+        if remove_empty_target:
+            remove_empty_directory_if_created(target, existed_before=False)
         remove_created_empty_directories(created_parent_chain)
 
 
@@ -347,11 +389,20 @@ def prune_empty_control_dirs(target: Path) -> None:
             directory.rmdir()
 
 
-def safe_target_path(target: Path, relative: str) -> Path:
+def validate_managed_relative_path(relative: str, label: str) -> str:
+    if not isinstance(relative, str) or not relative:
+        fail(f"{label} is invalid")
     candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        fail(f"invalid managed path: {relative}")
-    return target / candidate
+    if candidate.is_absolute() or candidate.as_posix() in {"", "."} or ".." in candidate.parts:
+        fail(f"{label} is outside the managed target: {relative}")
+    root = candidate.parts[0] if candidate.parts else ""
+    if root in FORBIDDEN_MANAGED_PATH_ROOTS:
+        fail(f"{label} targets NDDev control or software state: {relative}")
+    return candidate.as_posix()
+
+
+def safe_target_path(target: Path, relative: str) -> Path:
+    return target / validate_managed_relative_path(relative, "managed path")
 
 
 def ensure_real_parent(path: Path, target: Path) -> None:
@@ -658,6 +709,12 @@ def content_managed_paths() -> tuple[str, ...]:
     return tuple(dict.fromkeys(paths))
 
 
+def expected_managed_path_set_for_stamp(stamp: dict[str, Any]) -> set[str]:
+    if stamp["schema_version"] == LEGACY_STAMP_SCHEMA_VERSION:
+        return set(LEGACY_MANAGED_PATHS)
+    return set(content_managed_paths())
+
+
 def desired_files(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, bytes]:
     existing_config = read_existing_file(
         target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml"
@@ -705,6 +762,51 @@ def stamp_path(target: Path) -> Path:
     return target / STAMP_NAME
 
 
+def validate_stamp_value(stamp: dict[str, Any], target: Path, label: str) -> dict[str, Any]:
+    if not isinstance(stamp, dict):
+        fail(f"{label} must contain a JSON object")
+    if stamp.get("product_name") != PRODUCT_NAME:
+        fail(f"{label} belongs to another product")
+    canonical = str(validate_target(target, create=False))
+    if stamp.get("canonical_target") != canonical:
+        fail(f"{label} is bound to a different canonical target")
+    schema = stamp.get("schema_version")
+    if type(schema) is not int or schema not in {
+        LEGACY_STAMP_SCHEMA_VERSION,
+        STAMP_SCHEMA_VERSION,
+    }:
+        fail(f"{label} schema version is unsupported")
+    expected_keys = STAMP_KEYS_V1 if schema == LEGACY_STAMP_SCHEMA_VERSION else STAMP_KEYS_V2
+    if set(stamp) != expected_keys:
+        fail(f"{label} has invalid keys")
+    if not isinstance(stamp["build_version"], str) or not stamp["build_version"]:
+        fail(f"{label} build_version is invalid")
+    setup_id = stamp["setup_id"]
+    if not isinstance(setup_id, str) or not SETUP_ID_PATTERN.fullmatch(setup_id):
+        fail(f"{label} setup_id is invalid")
+    if schema == LEGACY_STAMP_SCHEMA_VERSION:
+        if setup_id not in LEGACY_SETUP_ORDER:
+            fail(f"{label} legacy setup_id is unsupported")
+    elif setup_id not in CONTENT_SETUP_ORDER:
+        fail(f"{label} setup_id is unsupported")
+    if schema == STAMP_SCHEMA_VERSION:
+        profile_id = stamp["profile_id"]
+        if not isinstance(profile_id, str) or profile_id not in PROFILE_ORDER:
+            fail(f"{label} profile_id is unsupported")
+    managed = stamp["managed_files"]
+    if not isinstance(managed, dict) or not managed:
+        fail(f"{label} managed_files is invalid")
+    if set(managed) != expected_managed_path_set_for_stamp(stamp):
+        fail(f"{label} managed path set is invalid")
+    for relative, expected in managed.items():
+        validate_managed_relative_path(relative, f"{label} managed path")
+        if relative == STAMP_NAME:
+            fail(f"{label} managed_files must not include the stamp")
+        if not isinstance(expected, str) or not SHA256_PATTERN.fullmatch(expected):
+            fail(f"{label} managed file digest is invalid")
+    return stamp
+
+
 def read_stamp(target: Path) -> dict[str, Any] | None:
     path = stamp_path(target)
     if not path.exists():
@@ -712,19 +814,7 @@ def read_stamp(target: Path) -> dict[str, Any] | None:
     stamp = read_json_file(
         path, max_bytes=METADATA_MAX_BYTES, label=STAMP_NAME, expected_mode=OWNER_FILE_MODE
     )
-    if stamp.get("product_name") != PRODUCT_NAME:
-        fail("stamp belongs to another product")
-    canonical = str(validate_target(target, create=False))
-    if stamp.get("canonical_target") != canonical:
-        fail("stamp is bound to a different canonical target")
-    schema = stamp.get("schema_version")
-    if schema not in {LEGACY_STAMP_SCHEMA_VERSION, STAMP_SCHEMA_VERSION}:
-        fail("stamp schema version is unsupported")
-    if not isinstance(stamp.get("setup_id"), str):
-        fail("stamp setup_id is invalid")
-    if schema == STAMP_SCHEMA_VERSION and not isinstance(stamp.get("profile_id"), str):
-        fail("stamp profile_id is invalid")
-    return stamp
+    return validate_stamp_value(stamp, target, "stamp")
 
 
 def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
@@ -874,6 +964,112 @@ def create_backup(target: Path, stamp: dict[str, Any]) -> int:
     return slot
 
 
+def decode_backup_payload(relative: str, encoded: Any) -> bytes:
+    if not isinstance(encoded, str):
+        fail(f"backup file payload is invalid: {relative}")
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError) as exc:
+        fail(f"backup file payload is not valid base64: {relative}: {exc}")
+    if len(data) > MANAGED_MAX_BYTES:
+        fail(f"backup file payload is too large: {relative}")
+    return data
+
+
+def decode_json_bytes(data: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"{label} is invalid JSON: {exc}")
+    if not isinstance(value, dict):
+        fail(f"{label} must contain a JSON object")
+    return value
+
+
+def validate_backup_envelope(
+    target: Path, slot: int, envelope: dict[str, Any]
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    if set(envelope) != BACKUP_ENVELOPE_KEYS:
+        fail("backup envelope has invalid keys")
+    if (
+        type(envelope["schema_version"]) is not int
+        or envelope["schema_version"] != STAMP_SCHEMA_VERSION
+    ):
+        fail("backup envelope schema version is unsupported")
+    if envelope["product_name"] != PRODUCT_NAME:
+        fail("backup belongs to another product")
+    if not isinstance(envelope["build_version"], str) or not envelope["build_version"]:
+        fail("backup build_version is invalid")
+    if type(envelope["slot"]) is not int or envelope["slot"] != slot:
+        fail("backup slot is invalid")
+    if not isinstance(envelope["canonical_target"], str):
+        fail("backup canonical_target is invalid")
+    if envelope["canonical_target"] != str(validate_target(target, create=False)):
+        fail("backup is bound to a different canonical target")
+    if (
+        not isinstance(envelope["source_setup_id"], str)
+        or not SETUP_ID_PATTERN.fullmatch(envelope["source_setup_id"])
+    ):
+        fail("backup source_setup_id is invalid")
+    source_profile_id = envelope["source_profile_id"]
+    if source_profile_id is not None and not isinstance(source_profile_id, str):
+        fail("backup source_profile_id is invalid")
+    if type(envelope["source_stamp_schema"]) is not int or envelope[
+        "source_stamp_schema"
+    ] not in {
+        LEGACY_STAMP_SCHEMA_VERSION,
+        STAMP_SCHEMA_VERSION,
+    }:
+        fail("backup source stamp schema is unsupported")
+    if type(envelope["created_at"]) is not int or envelope["created_at"] < 0:
+        fail("backup created_at is invalid")
+    files = envelope["files"]
+    if not isinstance(files, dict):
+        fail("backup files are invalid")
+    decoded: dict[str, bytes] = {}
+    for relative, encoded in files.items():
+        validate_managed_relative_path(relative, "backup file path")
+        decoded[relative] = decode_backup_payload(relative, encoded)
+    stamp_payload = decoded.get(STAMP_NAME)
+    if stamp_payload is None:
+        fail("backup stamp payload is missing")
+    restored_stamp = validate_stamp_value(
+        decode_json_bytes(stamp_payload, "backup restored stamp"),
+        target,
+        "backup restored stamp",
+    )
+    if envelope["source_setup_id"] != restored_stamp["setup_id"]:
+        fail("backup source_setup_id does not match restored stamp")
+    if envelope["source_profile_id"] != restored_stamp.get("profile_id"):
+        fail("backup source_profile_id does not match restored stamp")
+    if envelope["source_stamp_schema"] != restored_stamp["schema_version"]:
+        fail("backup source stamp schema does not match restored stamp")
+    expected_paths = {*restored_stamp["managed_files"], STAMP_NAME}
+    if set(decoded) != expected_paths:
+        fail("backup file set does not match restored stamp")
+    for relative, expected_digest in restored_stamp["managed_files"].items():
+        payload = decoded.get(relative)
+        if payload is None:
+            fail(f"backup managed file payload is missing: {relative}")
+        try:
+            actual_digest = managed_digest_for_bytes(relative, payload)
+        except UnicodeDecodeError as exc:
+            fail(f"backup managed file payload is invalid UTF-8: {relative}: {exc}")
+        if actual_digest != expected_digest:
+            fail(f"backup managed file digest mismatch: {relative}")
+    return decoded, restored_stamp
+
+
+def validate_restored_state(target: Path, expected_stamp: dict[str, Any]) -> dict[str, Any]:
+    restored_stamp = read_stamp(target)
+    if restored_stamp != expected_stamp:
+        fail("restored stamp does not match the backup envelope")
+    drift = drift_for_stamp(target, restored_stamp)
+    if drift:
+        fail(f"restored target has drift: {', '.join(drift)}")
+    return restored_stamp
+
+
 def build_stamp(
     target: Path, setup_id: str, profile_id: str, files: dict[str, bytes]
 ) -> dict[str, Any]:
@@ -988,34 +1184,21 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
             label=BACKUP_NAME,
             expected_mode=OWNER_FILE_MODE,
         )
-        if envelope.get("product_name") != PRODUCT_NAME:
-            fail("backup belongs to another product")
-        if envelope.get("canonical_target") != str(validate_target(target, create=False)):
-            fail("backup is bound to a different canonical target")
-        files = envelope.get("files")
-        if not isinstance(files, dict):
-            fail("backup files are invalid")
+        files, expected_stamp = validate_backup_envelope(target, slot, envelope)
         snapshot = snapshot_files(target, extra_paths=sorted(files))
         try:
-            for relative in sorted(files):
-                encoded = files.get(relative)
+            for relative, data in sorted(files.items()):
                 path = safe_target_path(target, relative)
-                if encoded is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-                    continue
-                if not isinstance(encoded, str):
-                    fail("backup file payload is invalid")
-                atomic_write(path, base64.b64decode(encoded.encode("ascii")), target)
+                atomic_write(path, data, target)
             prune_empty_managed_dirs(target)
+            restored_stamp = validate_restored_state(target, expected_stamp)
         except BaseException:
             restore_snapshot(target, snapshot)
             raise
-        restored_stamp = read_stamp(target)
         return {
-            "setup_id": None if restored_stamp is None else restored_stamp["setup_id"],
-            "profile_id": None if restored_stamp is None else restored_stamp.get("profile_id"),
-            "legacy": False if restored_stamp is None else is_legacy_stamp(restored_stamp),
+            "setup_id": restored_stamp["setup_id"],
+            "profile_id": restored_stamp.get("profile_id"),
+            "legacy": is_legacy_stamp(restored_stamp),
             "backup_slot": slot,
             "target": str(validate_target(target, create=False)),
         }
@@ -1333,20 +1516,33 @@ def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
     if source != INSTALLER_URL:
         fail("Grok Build installer source must be the pinned official URL")
     request = urllib.request.Request(source, headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        expected_length = response.headers.get("Content-Length")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                fail("Grok Build installer exceeds bounded read limit")
-            chunks.append(chunk)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            expected_length_header = response.headers.get("Content-Length")
+            expected_length = None
+            if expected_length_header is not None:
+                try:
+                    expected_length = int(expected_length_header)
+                except (TypeError, ValueError) as exc:
+                    fail(f"official Grok Build installer Content-Length is invalid: {exc}")
+                if expected_length < 0:
+                    fail("official Grok Build installer Content-Length is invalid")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    fail("Grok Build installer exceeds bounded read limit")
+                chunks.append(chunk)
+    except GrokBuildSetupError:
+        raise
+    except (http.client.HTTPException, OSError, TimeoutError, urllib.error.URLError) as exc:
+        fail(f"official Grok Build installer fetch failed: {exc}")
     content = b"".join(chunks)
-    if expected_length is not None and int(expected_length) != len(content):
+    if expected_length is not None and expected_length != len(content):
         fail("Grok Build installer length changed while reading")
     return content
 

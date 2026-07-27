@@ -30,6 +30,10 @@
   use only the pinned official installer.
 - Held the managed target lock through launch, denied Grok Build state-mutating
   subcommands, and added immediate launch image inode and digest rechecks.
+- Strictly validate backup envelopes, base64 payloads, restored stamp path sets,
+  and digests before restore writes, with post-restore clean-state rollback.
+- Normalize ordinary pinned installer fetch failures into stable manager JSON
+  errors without swallowing interrupts.
 
 ### Removed
 

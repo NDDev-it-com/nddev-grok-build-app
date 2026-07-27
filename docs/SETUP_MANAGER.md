@@ -12,6 +12,9 @@ content, and rotates ten target-bound backups under
 current-user-owned directories with mode `0700`; managed files are written with
 mode `0600`. Files outside the managed set are preserved. `config.toml` and
 `AGENTS.md` are co-owned by replacing only the NDDev managed marker block.
+Restore validates the complete backup envelope, strict base64 payloads, stamp
+path set, and file digests before writing. It then validates the restored clean
+state inside the same rollback-protected transaction.
 
 The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
 validated against `build/manifest.json`; do not duplicate it by hand.
@@ -53,6 +56,8 @@ The vendor installer runs in a temporary staging area with isolated `HOME`,
 only the staging `grok` binary, then persists a regular target-owned executable
 at `bin/grok` and the version tree. Staged shell rc files, completions,
 installer `config.toml`, and the vendor `agent` alias are discarded.
+Ordinary installer fetch and protocol failures are reported as stable manager
+JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch holds the

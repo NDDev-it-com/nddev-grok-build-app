@@ -1,22 +1,61 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "nddev-grok-build-app",
-  "build_version": "0.1.0",
+  "build_version": "0.2.0",
   "entrypoint": "python3 cli-tools/nddev_grok_build.py",
   "source_root": "setups",
-  "setup_ids": [
-    "safe",
-    "balanced",
-    "full-auto"
-  ],
+  "profile_root": "profiles",
+  "default_setup": "nddev-builder",
+  "default_profile": "full-auto",
+  "setup_ids": ["nddev-builder"],
+  "profile_ids": ["full-auto", "safe"],
+  "legacy_setup_ids": ["safe", "balanced", "full-auto"],
   "managed_files": [
     "config.toml",
     "AGENTS.md",
-    "skills/nddev-builder/SKILL.md",
+    "plugins/nddev-builder/agents/nddev-builder.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/agents/nddev-builder.md",
     "agents/nddev-builder.md",
     "plugins/nddev-builder/plugin.json",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/plugin.json",
+    "plugins/nddev-builder/skills/grok-agents-subagents/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-agents-subagents/SKILL.md",
+    "skills/grok-agents-subagents/SKILL.md",
+    "plugins/nddev-builder/skills/grok-config-profile/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-config-profile/SKILL.md",
+    "skills/grok-config-profile/SKILL.md",
+    "plugins/nddev-builder/skills/grok-creator-checker-release/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-creator-checker-release/SKILL.md",
+    "skills/grok-creator-checker-release/SKILL.md",
+    "plugins/nddev-builder/skills/grok-hooks/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-hooks/SKILL.md",
+    "skills/grok-hooks/SKILL.md",
+    "plugins/nddev-builder/skills/grok-install-lifecycle/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-install-lifecycle/SKILL.md",
+    "skills/grok-install-lifecycle/SKILL.md",
+    "plugins/nddev-builder/skills/grok-mcp/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-mcp/SKILL.md",
+    "skills/grok-mcp/SKILL.md",
+    "plugins/nddev-builder/skills/grok-permissions-sandbox/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-permissions-sandbox/SKILL.md",
+    "skills/grok-permissions-sandbox/SKILL.md",
+    "plugins/nddev-builder/skills/grok-plugins-marketplace/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-plugins-marketplace/SKILL.md",
+    "skills/grok-plugins-marketplace/SKILL.md",
+    "plugins/nddev-builder/skills/grok-skills-instructions/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/grok-skills-instructions/SKILL.md",
+    "skills/grok-skills-instructions/SKILL.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
     "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
-    "plugins/nddev-builder/agents/nddev-builder.md",
+    "skills/nddev-builder/SKILL.md",
+    "plugins/nddev-builder/skills/nddev-builder/references/native-surfaces.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/nddev-builder/references/native-surfaces.md",
+    "skills/nddev-builder/references/native-surfaces.md",
+    "plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+    "plugins/marketplaces/nddev-builder/plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+    "skills/nddev-builder/references/validation-workflows.md",
+    "plugins/marketplaces/nddev-builder/.grok-plugin/marketplace.json",
+    "plugins/marketplaces/nddev-builder/.grok-plugin/plugin-index.json",
     "NDDEV-GROK-BUILD-SETUP.json"
   ],
   "command_policy": {
@@ -26,6 +65,7 @@
       "plan",
       "install",
       "switch",
+      "migrate",
       "restore",
       "remove",
       "software-status",
@@ -37,6 +77,7 @@
       "plan",
       "install",
       "switch",
+      "migrate",
       "restore",
       "remove",
       "software-status",
@@ -56,18 +97,26 @@
     "streams_child_stdio": true,
     "requires_clean_managed_target": true,
     "requires_current_target_owned_software": true,
+    "denies_legacy_managed_state": true,
     "path_fallback": false,
     "managed_command": "bin/grok",
     "target_environment_scope": "child-process-only",
-    "required_version": "0.2.112"
+    "required_version": "0.2.112",
+    "supported_platforms": ["macos", "linux"]
   },
   "software_lifecycle": {
     "supported": true,
     "product_name": "Grok Build",
     "command": "grok",
     "version": "0.2.112",
+    "channel": "stable",
+    "npm_package": "@xai-official/grok",
+    "npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
+    "npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8",
+    "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
     "installer_url": "https://x.ai/cli/install.sh",
     "installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+    "installer_exact_version_arg": "0.2.112",
     "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-target> [--json]",
     "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-target> [--json]",
     "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-target> [--json]",
@@ -79,7 +128,9 @@
     "entrypoint": "bin/grok",
     "stage_env": {
       "HOME": "<stage>/home",
+      "GROK_HOME": "<stage>/grok-home",
       "GROK_BIN_DIR": "<stage>/bin",
+      "GROK_CHANNEL": "stable",
       "TMPDIR": "<stage>/tmp",
       "PATH": "<stage>/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
     },
@@ -93,6 +144,46 @@
       "binary": "0700"
     },
     "rollback_on_failure": true
+  },
+  "setup_profile_model": {
+    "content_setup": "nddev-builder",
+    "permission_profiles": {
+      "full-auto": {
+        "permission_mode": "always-approve",
+        "sandbox_profile": "off",
+        "managed_permission_rules": false
+      },
+      "safe": {
+        "permission_mode": "ask",
+        "sandbox_profile": "strict",
+        "managed_permission_rules": false
+      }
+    }
+  },
+  "nddev_builder": {
+    "source": "builder/nddev-builder",
+    "version": "0.2.0",
+    "native_surfaces": [
+      "$GROK_HOME/skills/nddev-builder/SKILL.md",
+      "$GROK_HOME/agents/nddev-builder.md",
+      "$GROK_HOME/plugins/nddev-builder/plugin.json",
+      "$GROK_HOME/plugins/marketplaces/nddev-builder/.grok-plugin/marketplace.json",
+      "$GROK_HOME/plugins/marketplaces/nddev-builder/.grok-plugin/plugin-index.json",
+      "$GROK_HOME/plugins/marketplaces/nddev-builder/plugins/nddev-builder/plugin.json",
+      "[plugins].enabled",
+      "[[marketplace.sources]]"
+    ],
+    "managed_capabilities": {
+      "memory": true,
+      "subagents": true,
+      "web_fetch": true,
+      "lsp_tools": true,
+      "write_file": true,
+      "tool_search": true,
+      "auto_update": false,
+      "load_envrc": false
+    },
+    "binary_delivery": false
   },
   "backup_policy": {
     "location": "sibling .<target-name>.nddev-grok-build-backups",
@@ -113,19 +204,6 @@
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
     "lock": "exclusive sibling directory"
-  },
-  "nddev_builder": {
-    "default_on": true,
-    "source": "builder/nddev-builder",
-    "native_surfaces": [
-      "$GROK_HOME/skills/nddev-builder/SKILL.md",
-      "$GROK_HOME/agents/nddev-builder.md",
-      "$GROK_HOME/plugins/nddev-builder/plugin.json",
-      "$GROK_HOME/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
-      "$GROK_HOME/plugins/nddev-builder/agents/nddev-builder.md",
-      "[plugins].enabled"
-    ],
-    "external_marketplace_published": null
   },
   "runtime_compatibility": {
     "baseline_ref": "references/grok-build-baseline.json",

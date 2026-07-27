@@ -1,12 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "observed_at": "2026-07-27",
   "product": {
     "name": "Grok Build",
     "vendor": "xAI",
-    "status": "beta",
+    "status": "stable-channel-available-ga-unclaimed",
     "official_product_url": "https://x.ai/cli",
-    "official_docs_url": "https://docs.x.ai/build/overview"
+    "official_docs_url": "https://docs.x.ai/build/getting-started"
   },
   "runtime": {
     "command": "grok",
@@ -21,22 +21,32 @@
     "skills": "$GROK_HOME/skills",
     "agents": "$GROK_HOME/agents",
     "plugins": "$GROK_HOME/plugins",
+    "marketplaces": "$GROK_HOME/plugins/marketplaces",
     "hooks": "$GROK_HOME/hooks"
   },
   "release": {
     "npm_package": "@xai-official/grok",
     "npm_version": "0.2.112",
+    "npm_dist_tags": {
+      "latest": "0.2.112",
+      "alpha": "0.2.112"
+    },
+    "stable_channel_version": "0.2.112",
+    "alpha_channel_version": "0.2.112",
+    "enterprise_channel_version": "0.2.112",
     "npm_published_at": "2026-07-24T22:22:44.621Z",
     "npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
     "npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8",
+    "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
     "npm_bin": {
       "grok": "bin/grok"
     },
-    "changelog_latest_page_version": "0.2.111",
-    "changelog_latest_page_date": "2026-07-22",
-    "changelog_url": "https://x.ai/build/changelog",
+    "npm_engines": {
+      "node": ">=20"
+    },
     "official_installer": "https://x.ai/cli/install.sh",
     "official_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+    "official_installer_channel": "stable",
     "official_installer_exact_version_arg": "0.2.112",
     "module_install_mechanism": "vendor-installer-only",
     "module_npm_install_supported": false,
@@ -48,56 +58,115 @@
     "main_commit": "b41c75a578f98bddbd326ab02cd53618451d97ee",
     "source_rev": "b41c75a578f98bddbd326ab02cd53618451d97ee",
     "pushed_at": "2026-07-26T20:58:13Z",
+    "license": "Apache-2.0",
     "release_tags_observed": []
+  },
+  "native_config": {
+    "permission_modes": ["ask", "auto", "always-approve"],
+    "agent_permission_modes": ["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"],
+    "sandbox_profiles": ["off", "workspace", "devbox", "read-only", "strict"],
+    "content_setup_owned_keys": [
+      "[features].web_fetch",
+      "[features].lsp_tools",
+      "[features].write_file",
+      "[features].tool_search",
+      "[memory].enabled",
+      "[subagents].enabled",
+      "[cli].auto_update",
+      "[session].load_envrc",
+      "[plugins].enabled",
+      "[[marketplace.sources]]"
+    ],
+    "project_config_limited_to": ["mcp_servers", "plugins", "permission"]
+  },
+  "native_discovery": {
+    "skills": [
+      "./.grok/skills/",
+      "$GROK_HOME/skills/",
+      "enabled plugin skills/",
+      "[skills].paths",
+      ".agents/skills/"
+    ],
+    "agents": ["./.grok/agents/", "$GROK_HOME/agents/", "enabled plugin agents/"],
+    "plugins": [
+      "./.grok/plugins/",
+      "$GROK_HOME/plugins/",
+      "$GROK_HOME/plugins/marketplaces/",
+      "[plugins].paths",
+      "--plugin-dir"
+    ],
+    "marketplaces": [
+      "[[marketplace.sources]]",
+      "$GROK_HOME/plugins/known_marketplaces.json"
+    ],
+    "hooks": ["$GROK_HOME/hooks/*.json", ".grok/hooks/*.json", "enabled plugin hooks"],
+    "mcp": ["[mcp_servers.<name>]", "plugin .mcp.json"],
+    "instructions": ["AGENTS.md", "Agents.md", "AGENT.md"]
   },
   "official_sources": [
     {
-      "fact": "overview-install-start-headless",
-      "url": "https://docs.x.ai/build/overview.md"
+      "fact": "product-and-install",
+      "url": "https://x.ai/cli"
+    },
+    {
+      "fact": "getting-started-auth",
+      "url": "https://docs.x.ai/build/getting-started"
     },
     {
       "fact": "cli-command-flags",
-      "url": "https://docs.x.ai/build/cli/reference.md"
+      "url": "https://docs.x.ai/build/cli/reference"
     },
     {
       "fact": "settings-paths-and-scopes",
-      "url": "https://docs.x.ai/build/settings.md"
+      "url": "https://docs.x.ai/build/settings"
     },
     {
       "fact": "settings-reference-env-toml",
-      "url": "https://docs.x.ai/build/settings/reference.md"
-    },
-    {
-      "fact": "skills-plugins-marketplaces",
-      "url": "https://docs.x.ai/build/features/skills-plugins-marketplaces.md"
+      "url": "https://docs.x.ai/build/settings/reference"
     },
     {
       "fact": "permissions",
-      "url": "https://docs.x.ai/build/features/permissions.md"
+      "url": "https://docs.x.ai/build/features/permissions"
     },
     {
       "fact": "sandbox",
-      "url": "https://docs.x.ai/build/features/sandbox.md"
+      "url": "https://docs.x.ai/build/features/sandbox"
+    },
+    {
+      "fact": "skills-plugins-marketplaces",
+      "url": "https://docs.x.ai/build/features/skills-plugins-marketplaces"
+    },
+    {
+      "fact": "mcp-servers",
+      "url": "https://docs.x.ai/build/features/mcp-servers"
+    },
+    {
+      "fact": "hooks",
+      "url": "https://docs.x.ai/build/features/hooks"
+    },
+    {
+      "fact": "subagents",
+      "url": "https://docs.x.ai/build/features/subagents"
     },
     {
       "fact": "project-rules",
-      "url": "https://docs.x.ai/build/features/project-rules.md"
+      "url": "https://docs.x.ai/build/features/project-rules"
     },
     {
-      "fact": "enterprise-distribution",
-      "url": "https://docs.x.ai/build/enterprise.md"
+      "fact": "enterprise-deployments",
+      "url": "https://docs.x.ai/build/enterprise"
     },
     {
       "fact": "source-repository",
-      "url": "https://x.ai/open-source"
+      "url": "https://github.com/xai-org/grok-build"
     },
     {
-      "fact": "plugin-guide-source",
-      "url": "https://raw.githubusercontent.com/xai-org/grok-build/main/crates/codegen/xai-grok-pager/docs/user-guide/09-plugins.md"
+      "fact": "plugin-manifest-source",
+      "url": "https://raw.githubusercontent.com/xai-org/grok-build/main/crates/codegen/xai-grok-agent/src/plugins/manifest.rs"
     }
   ],
   "unsupported": {
-    "external_nddev_builder_marketplace": null,
-    "native_binary_delivery_by_plugins": null
+    "native_binary_delivery_by_plugins": false,
+    "balanced_profile": false
   }
 }

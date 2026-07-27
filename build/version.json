@@ -1,9 +1,15 @@
 {
-  "schema_version": 2,
-  "build_version": "0.1.0",
+  "schema_version": 3,
+  "build_version": "0.2.0",
   "grok_build_tested": "0.2.112",
+  "grok_build_channel": "stable",
   "grok_build_npm_package": "@xai-official/grok",
-  "nddev_builder_plugin_version": "0.1.0",
+  "grok_build_npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
+  "grok_build_npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8",
+  "grok_build_npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
+  "grok_build_installer": "https://x.ai/cli/install.sh",
+  "grok_build_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+  "nddev_builder_plugin_version": "0.2.0",
   "python_requires": ">=3.10",
   "runtime_baseline_ref": "references/grok-build-baseline.json"
 }

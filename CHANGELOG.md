@@ -38,6 +38,8 @@
   into the shared release workflow.
 - Replace the removable directory lock with a persistent `fcntl.flock` lock file
   and deny concurrent setup mutations during managed launch.
+- Keep runtime state writable during managed launch by making only dedicated
+  lock and launch-image directories non-writable.
 
 ### Removed
 

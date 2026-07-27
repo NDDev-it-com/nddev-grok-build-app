@@ -208,9 +208,11 @@
     "reject_symlink_managed_files": true,
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
-    "lock": "$GROK_HOME/.nddev-grok-build/lock",
+    "lock": "$GROK_HOME/.nddev-grok-build/locks/target.lock",
+    "lock_parent": "$GROK_HOME/.nddev-grok-build/locks",
     "lock_type": "persistent regular file with fcntl.flock",
     "lock_file_mode": "0600",
+    "control_root_mode_while_locked": "0700",
     "lock_parent_mode_while_held": "0500",
     "lock_parent_mode_when_unlocked": "0700",
     "lock_held_through_launch_child": true,
@@ -220,6 +222,9 @@
     "restore_rollback_byte_identical_on_failure": true,
     "launch_requires_current_software": true,
     "launch_uses_verified_private_image": true,
+    "launch_image_directory": "$GROK_HOME/.nddev-grok-build/launch-images",
+    "launch_image_file_mode": "0500",
+    "runtime_home_tmp_xdg_writable_while_locked": true,
     "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation, especially under sandbox off, is outside the cross-user isolation boundary"
   },
   "runtime_compatibility": {

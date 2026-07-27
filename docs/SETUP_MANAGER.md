@@ -19,11 +19,14 @@ state inside the same rollback-protected transaction.
 The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
 validated against `build/manifest.json`; do not duplicate it by hand.
 Manager mutations use a target-internal regular lock file at
-`$GROK_HOME/.nddev-grok-build/lock`, opened with no-follow semantics, mode
-`0600`, and an exclusive `fcntl.flock` descriptor. While the lock is held, the
-control root is mode `0500`, so cooperative child unlink or rmdir attempts
-against the lock path fail. Stale held-mode control roots or old directory
-locks are recovered only after strict real-path, owner, and mode checks.
+`$GROK_HOME/.nddev-grok-build/locks/target.lock`, opened with no-follow
+semantics, mode `0600`, and an exclusive `fcntl.flock` descriptor. While the
+lock is held, only the dedicated `locks/` parent is mode `0500`; the control
+root, backup pool, tmp directory, runtime `HOME`, runtime `TMPDIR`, XDG
+directories, and target root remain writable for the launched CLI. Stale
+held-mode lock parents, stale held-mode control roots from older builds, and
+old directory locks are recovered only after strict real-path, owner, and mode
+checks.
 
 ## Content Setup
 
@@ -68,12 +71,14 @@ JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch holds the
 target-internal flock descriptor through the child process, verifies `bin/grok`,
-starts a private target-internal launch image, immediately rechecks its inode
-and digest, and removes that image after the child exits. Lifecycle, auth,
-plugin, marketplace, and MCP mutating subcommands are denied through managed
-launch. Cooperative same-user manager operations are serialized; direct
-malicious same-user mutation, especially under `full-auto` sandbox `off`, is
-outside the cross-user isolation boundary.
+starts a private target-internal launch image under
+`.nddev-grok-build/launch-images`, makes that launch-image directory
+non-writable while the child runs, immediately rechecks the image inode and
+digest, and removes the image after the child exits. Lifecycle, auth, plugin,
+marketplace, and MCP mutating subcommands are denied through managed launch.
+Cooperative same-user manager operations are serialized; direct malicious
+same-user mutation, especially under `full-auto` sandbox `off`, is outside the
+cross-user isolation boundary.
 
 ## Legacy State
 

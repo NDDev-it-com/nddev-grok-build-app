@@ -315,7 +315,13 @@ def validate_manager_source() -> None:
     for marker in FORBIDDEN_MANAGER_SOURCE_MARKERS:
         if marker in source:
             raise ValueError(f"manager source exposes forbidden test switch marker: {marker}")
-    for marker in ("O_NOFOLLOW", "fcntl.flock", "LOCK_PARENT_HELD_MODE = 0o500"):
+    for marker in (
+        "O_NOFOLLOW",
+        "fcntl.flock",
+        "LOCK_PARENT_HELD_MODE = 0o500",
+        "IMMUTABLE_EXEC_MODE = 0o500",
+        'LOCK_DIR_NAME = "locks"',
+    ):
         if marker not in source:
             raise ValueError(f"manager source is missing lock invariant marker: {marker}")
 
@@ -356,6 +362,55 @@ def install_stub_software(manager: Any, target: Path, body: bytes) -> str:
     )
     manager.software_stamp_path(target).chmod(manager.OWNER_FILE_MODE)
     return digest
+
+
+def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
+    body = (
+        b"#!/bin/sh\n"
+        b"set -eu\n"
+        b"mkdir -p \"$HOME/.config/grok-build\"\n"
+        b"mkdir -p \"$XDG_CONFIG_HOME/grok-build\"\n"
+        b"mkdir -p \"$XDG_CACHE_HOME/grok-build\"\n"
+        b"mkdir -p \"$XDG_DATA_HOME/grok-build\"\n"
+        b"mkdir -p \"$XDG_STATE_HOME/grok-build\"\n"
+        b"mkdir -p \"$TMPDIR/grok-build\"\n"
+        b"mkdir -p \"$GROK_HOME/runtime-state\"\n"
+        b"printf home > \"$HOME/.config/grok-build/home.txt\"\n"
+        b"printf config > \"$XDG_CONFIG_HOME/grok-build/config.txt\"\n"
+        b"printf cache > \"$XDG_CACHE_HOME/grok-build/cache.txt\"\n"
+        b"printf data > \"$XDG_DATA_HOME/grok-build/data.txt\"\n"
+        b"printf state > \"$XDG_STATE_HOME/grok-build/session.txt\"\n"
+        b"printf tmp > \"$TMPDIR/grok-build/tmp.txt\"\n"
+        b"printf target > \"$GROK_HOME/runtime-state/target.txt\"\n"
+        b"if rm \"$GROK_HOME/.nddev-grok-build/locks/target.lock\" 2>/dev/null; then exit 70; fi\n"
+        b"if rmdir \"$GROK_HOME/.nddev-grok-build/locks\" 2>/dev/null; then exit 71; fi\n"
+        b"if (printf bad > \"$0\") 2>/dev/null; then exit 72; fi\n"
+        b"printf ok > \"$GROK_HOME/runtime-state/result.txt\"\n"
+    )
+    install_stub_software(manager, target, body)
+    rc = manager.launch(target, ["runtime-write"])
+    if rc != 0:
+        raise ValueError(f"runtime write smoke exited {rc}")
+    runtime_root = target / ".nddev-grok-build-runtime"
+    expected = {
+        runtime_root / "home" / ".config" / "grok-build" / "home.txt": b"home",
+        runtime_root / "home" / ".config" / "grok-build" / "config.txt": b"config",
+        runtime_root / "home" / ".cache" / "grok-build" / "cache.txt": b"cache",
+        runtime_root / "home" / ".local" / "share" / "grok-build" / "data.txt": b"data",
+        runtime_root / "home" / ".local" / "state" / "grok-build" / "session.txt": b"state",
+        runtime_root / "tmp" / "grok-build" / "tmp.txt": b"tmp",
+        target / "runtime-state" / "target.txt": b"target",
+        target / "runtime-state" / "result.txt": b"ok",
+    }
+    for path, content in expected.items():
+        if path.read_bytes() != content:
+            raise ValueError(f"runtime write smoke did not write expected state: {path}")
+    if stat.S_IMODE(manager.managed_control_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+        raise ValueError("control root must stay writable after launch")
+    if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+        raise ValueError("lock parent was not restored after launch")
+    if manager.launch_image_dir(target).exists():
+        raise ValueError("launch image directory was not pruned after launch")
 
 
 def target_managed_bytes(manager: Any, target: Path) -> dict[str, bytes | None]:
@@ -601,15 +656,20 @@ def validate_adversarial_smokes(manager: Any) -> None:
             b"#!/bin/sh\n"
             b"printf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
         )
+        validate_runtime_write_smoke(manager, target)
         original_digest = install_stub_software(manager, target, original)
         original_popen = manager.subprocess.Popen
 
         class FakePopen:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
                 control = manager.managed_control_dir(target)
+                lock_parent = manager.lock_parent_dir(target)
                 lock = manager.lock_path(target)
                 control_mode = stat.S_IMODE(control.lstat().st_mode)
-                if control_mode != manager.LOCK_PARENT_HELD_MODE:
+                if control_mode != manager.OWNER_DIRECTORY_MODE:
+                    raise ValueError("launch made the control root non-writable")
+                lock_parent_mode = stat.S_IMODE(lock_parent.lstat().st_mode)
+                if lock_parent_mode != manager.LOCK_PARENT_HELD_MODE:
                     raise ValueError("launch did not make the lock parent non-writable")
                 lock_info = lock.lstat()
                 if not stat.S_ISREG(lock_info.st_mode):
@@ -623,19 +683,23 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 else:
                     raise ValueError("launch child could unlink the held lock file")
                 try:
-                    lock.rmdir()
+                    lock_parent.rmdir()
                 except OSError:
                     pass
                 else:
-                    raise ValueError("launch child could remove the held lock path")
+                    raise ValueError("launch child could remove the held lock parent")
                 expect_cli_lock_error(["remove", "--target", str(target), "--json"], original_popen)
                 expect_cli_lock_error(
                     ["switch", "--profile", "safe", "--target", str(target), "--json"],
                     original_popen,
                 )
                 launch_image = Path(command[0])
-                if launch_image.parent.resolve() != manager.control_tmp_dir(target).resolve():
+                if launch_image.parent.resolve() != manager.launch_image_dir(target).resolve():
                     raise ValueError("launch did not use a private target-internal launch image")
+                if stat.S_IMODE(launch_image.parent.lstat().st_mode) != manager.LOCK_PARENT_HELD_MODE:
+                    raise ValueError("launch image directory must be non-writable during launch")
+                if stat.S_IMODE(launch_image.lstat().st_mode) != manager.IMMUTABLE_EXEC_MODE:
+                    raise ValueError("launch image must use immutable executable mode")
                 if kwargs.get("close_fds") is not True:
                     raise ValueError("launch must close ambient file descriptors")
                 launched = launch_image.read_bytes()
@@ -659,14 +723,25 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 raise ValueError("stubbed launch did not return success")
         finally:
             manager.subprocess.Popen = original_popen
+        if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+            raise ValueError("launch lock parent was not restored")
+        if manager.launch_image_dir(target).exists():
+            raise ValueError("launch image directory was not removed")
 
         install_stub_software(manager, target, original)
 
         class MutatingPopen:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
                 launch_image = Path(command[0])
-                launch_image.write_bytes(replacement)
+                try:
+                    launch_image.write_bytes(replacement)
+                except PermissionError:
+                    pass
+                else:
+                    raise ValueError("ordinary launch image replacement unexpectedly succeeded")
+                launch_image.parent.chmod(manager.OWNER_DIRECTORY_MODE)
                 launch_image.chmod(manager.OWNER_EXEC_MODE)
+                launch_image.write_bytes(replacement)
                 self.returncode = 0
                 self.killed = False
 
@@ -858,12 +933,16 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest transaction_policy missing")
     if transaction.get("existing_target_mode_required") != "0700":
         raise ValueError("manifest must require existing target mode 0700")
-    if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/lock":
+    if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/locks/target.lock":
         raise ValueError("manifest lock must be target-internal")
+    if transaction.get("lock_parent") != "$GROK_HOME/.nddev-grok-build/locks":
+        raise ValueError("manifest lock parent mismatch")
     if transaction.get("lock_type") != "persistent regular file with fcntl.flock":
         raise ValueError("manifest lock_type mismatch")
     if transaction.get("lock_file_mode") != "0600":
         raise ValueError("manifest lock file mode mismatch")
+    if transaction.get("control_root_mode_while_locked") != "0700":
+        raise ValueError("manifest must keep the control root writable while locked")
     if transaction.get("lock_parent_mode_while_held") != "0500":
         raise ValueError("manifest lock held parent mode mismatch")
     if transaction.get("lock_parent_mode_when_unlocked") != "0700":
@@ -883,6 +962,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"manifest transaction_policy must set {key}=true")
     if transaction.get("launch_uses_verified_private_image") is not True:
         raise ValueError("manifest must require verified private launch image")
+    if transaction.get("launch_image_directory") != "$GROK_HOME/.nddev-grok-build/launch-images":
+        raise ValueError("manifest launch image directory mismatch")
+    if transaction.get("launch_image_file_mode") != "0500":
+        raise ValueError("manifest launch image file mode mismatch")
+    if transaction.get("runtime_home_tmp_xdg_writable_while_locked") is not True:
+        raise ValueError("manifest must keep runtime HOME/TMP/XDG writable")
     if "same user" not in str(
         transaction.get("same_uid_malicious_mutation_boundary", "")
     ).replace("-", " "):
@@ -905,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         "existing_target_private_mode_required",
         "sibling_lock_and_backup_state_ignored",
         "persistent_flock_lock_file",
+        "control_root_stays_writable_while_locked",
         "lock_parent_non_writable_while_held",
         "lock_held_through_launch_child",
         "concurrent_setup_mutations_denied_while_launching",
@@ -916,6 +1002,8 @@ def main(argv: list[str] | None = None) -> int:
         "installer_fetch_errors_are_domain_errors",
         "launch_requires_current_target_owned_software",
         "launch_uses_verified_private_image",
+        "launch_image_regular_immutable_mode",
+        "runtime_home_tmp_xdg_stay_writable_while_locked",
         "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations",
     ):
         if safety.get(key) is not True:

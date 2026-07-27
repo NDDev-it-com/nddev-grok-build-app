@@ -48,7 +48,10 @@ MANAGED_END = "# END NDDEV-GROK-BUILD MANAGED"
 OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
 OWNER_EXEC_MODE = 0o700
+IMMUTABLE_EXEC_MODE = 0o500
 LOCK_PARENT_HELD_MODE = 0o500
+LOCK_DIR_NAME = "locks"
+LOCK_FILE_NAME = "target.lock"
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
@@ -333,11 +336,41 @@ def control_tmp_dir(target: Path) -> Path:
     return managed_control_dir(target) / "tmp"
 
 
-def lock_path(target: Path) -> Path:
+def lock_parent_dir(target: Path) -> Path:
+    return managed_control_dir(target) / LOCK_DIR_NAME
+
+
+def legacy_lock_path(target: Path) -> Path:
     return managed_control_dir(target) / "lock"
 
 
+def lock_path(target: Path) -> Path:
+    return lock_parent_dir(target) / LOCK_FILE_NAME
+
+
+def launch_image_dir(target: Path) -> Path:
+    return managed_control_dir(target) / "launch-images"
+
+
 def require_control_directory(path: Path, label: str, *, allow_locked: bool) -> os.stat_result:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    require_current_user_owner(info, label)
+    allowed_modes = {OWNER_DIRECTORY_MODE}
+    if allow_locked:
+        allowed_modes.add(LOCK_PARENT_HELD_MODE)
+    if stat.S_IMODE(info.st_mode) not in allowed_modes:
+        modes = "0700" if not allow_locked else "0700 or 0500"
+        fail(f"{label} must have mode {modes}")
+    return info
+
+
+def require_lock_parent_directory(
+    path: Path, label: str, *, allow_locked: bool
+) -> os.stat_result:
     info = stat_existing(path, label)
     if info is None:
         fail(f"{label} is missing")
@@ -361,35 +394,73 @@ def ensure_lock_control_root(target: Path) -> Path:
         control.chmod(OWNER_DIRECTORY_MODE)
         require_control_directory(control, "NDDev control root", allow_locked=False)
         return control
-    require_control_directory(control, "NDDev control root", allow_locked=True)
-    return control
-
-
-def recover_legacy_lock_directory(target: Path) -> None:
-    control = managed_control_dir(target)
-    path = lock_path(target)
-    info = stat_existing(path, "target lock")
-    if info is None:
-        control_info = require_control_directory(
-            control, "NDDev control root", allow_locked=True
-        )
-        if stat.S_IMODE(control_info.st_mode) == LOCK_PARENT_HELD_MODE:
-            control.chmod(OWNER_DIRECTORY_MODE)
-            require_control_directory(control, "NDDev control root", allow_locked=False)
-        return
-    if not stat.S_ISDIR(info.st_mode):
-        return
-    require_current_user_owner(info, "target lock")
-    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
-        fail("legacy target lock directory must have mode 0700")
     control_info = require_control_directory(control, "NDDev control root", allow_locked=True)
     if stat.S_IMODE(control_info.st_mode) == LOCK_PARENT_HELD_MODE:
         control.chmod(OWNER_DIRECTORY_MODE)
         require_control_directory(control, "NDDev control root", allow_locked=False)
+    return control
+
+
+def recover_legacy_lock_state(target: Path) -> None:
+    control = managed_control_dir(target)
+    path = legacy_lock_path(target)
+    info = stat_existing(path, "target lock")
+    if info is None:
+        return
+    require_current_user_owner(info, "target lock")
+    control_info = require_control_directory(control, "NDDev control root", allow_locked=True)
+    if stat.S_ISDIR(info.st_mode):
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail("legacy target lock directory must have mode 0700")
+        if stat.S_IMODE(control_info.st_mode) == LOCK_PARENT_HELD_MODE:
+            control.chmod(OWNER_DIRECTORY_MODE)
+            require_control_directory(control, "NDDev control root", allow_locked=False)
+        try:
+            path.rmdir()
+        except OSError as exc:
+            fail(f"legacy target lock directory is not safely recoverable: {exc}")
+        return
+    if not stat.S_ISREG(info.st_mode):
+        fail("legacy target lock must be a regular file or empty directory")
+    if info.st_nlink != 1:
+        fail("legacy target lock must not be a hardlink")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("legacy target lock must have mode 0600")
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
     try:
-        path.rmdir()
-    except OSError as exc:
-        fail(f"legacy target lock directory is not safely recoverable: {exc}")
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            fail("legacy target lock changed while opening")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                fail(f"target is locked: {path}")
+            fail(f"legacy target lock recovery failed: {exc}")
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    if stat.S_IMODE(control_info.st_mode) == LOCK_PARENT_HELD_MODE:
+        control.chmod(OWNER_DIRECTORY_MODE)
+        require_control_directory(control, "NDDev control root", allow_locked=False)
+    path.unlink()
+
+
+def ensure_lock_parent(target: Path) -> None:
+    parent = lock_parent_dir(target)
+    info = stat_existing(parent, "target lock parent")
+    if info is None:
+        parent.mkdir(mode=OWNER_DIRECTORY_MODE)
+        parent.chmod(OWNER_DIRECTORY_MODE)
+        require_lock_parent_directory(parent, "target lock parent", allow_locked=False)
+        return
+    require_lock_parent_directory(parent, "target lock parent", allow_locked=True)
 
 
 def open_lock_file(target: Path) -> int:
@@ -402,7 +473,21 @@ def open_lock_file(target: Path) -> int:
     try:
         descriptor = os.open(path, flags, OWNER_FILE_MODE)
     except OSError as exc:
-        fail(f"target lock must be a regular owner-private file: {exc}")
+        parent_info = stat_existing(lock_parent_dir(target), "target lock parent")
+        if (
+            exc.errno in {errno.EACCES, errno.ENOENT}
+            and parent_info is not None
+            and stat.S_ISDIR(parent_info.st_mode)
+            and stat.S_IMODE(parent_info.st_mode) == LOCK_PARENT_HELD_MODE
+            and stat_existing(path, "target lock") is None
+        ):
+            lock_parent_dir(target).chmod(OWNER_DIRECTORY_MODE)
+            require_lock_parent_directory(
+                lock_parent_dir(target), "target lock parent", allow_locked=False
+            )
+            descriptor = os.open(path, flags, OWNER_FILE_MODE)
+        else:
+            fail(f"target lock must be a regular owner-private file: {exc}")
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
@@ -429,7 +514,8 @@ def open_lock_file(target: Path) -> int:
 
 def acquire_target_lock(target: Path) -> int:
     ensure_lock_control_root(target)
-    recover_legacy_lock_directory(target)
+    recover_legacy_lock_state(target)
+    ensure_lock_parent(target)
     descriptor = open_lock_file(target)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -456,23 +542,23 @@ def acquire_target_lock(target: Path) -> int:
         raise
 
 
-def prepare_locked_control_root(target: Path) -> None:
-    control = managed_control_dir(target)
-    control.chmod(OWNER_DIRECTORY_MODE)
-    require_control_directory(control, "NDDev control root", allow_locked=False)
-    ensure_private_directory(backup_pool(target), "backup pool")
-    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
-    control.chmod(LOCK_PARENT_HELD_MODE)
-    require_control_directory(control, "NDDev control root", allow_locked=True)
+def prepare_locked_lock_parent(target: Path) -> None:
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
+    parent = lock_parent_dir(target)
+    parent_info = require_lock_parent_directory(parent, "target lock parent", allow_locked=True)
+    if stat.S_IMODE(parent_info.st_mode) == OWNER_DIRECTORY_MODE:
+        parent.chmod(LOCK_PARENT_HELD_MODE)
+    require_lock_parent_directory(parent, "target lock parent", allow_locked=True)
 
 
-def restore_unlocked_control_root(target: Path) -> None:
-    control = managed_control_dir(target)
-    if not control.exists() and not control.is_symlink():
+def restore_unlocked_lock_parent(target: Path) -> None:
+    parent = lock_parent_dir(target)
+    if not parent.exists() and not parent.is_symlink():
         return
-    require_control_directory(control, "NDDev control root", allow_locked=True)
-    control.chmod(OWNER_DIRECTORY_MODE)
-    require_control_directory(control, "NDDev control root", allow_locked=False)
+    require_lock_parent_directory(parent, "target lock parent", allow_locked=True)
+    parent.chmod(OWNER_DIRECTORY_MODE)
+    require_lock_parent_directory(parent, "target lock parent", allow_locked=False)
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
 
 
 def remove_created_lock_state_if_empty(target: Path) -> None:
@@ -483,7 +569,7 @@ def remove_created_lock_state_if_empty(target: Path) -> None:
     if entries != [control]:
         return
     require_control_directory(control, "NDDev control root", allow_locked=False)
-    for directory in (control_tmp_dir(target), backup_pool(target)):
+    for directory in (launch_image_dir(target), control_tmp_dir(target), backup_pool(target)):
         with contextlib.suppress(FileNotFoundError, OSError):
             directory.rmdir()
     path = lock_path(target)
@@ -492,6 +578,14 @@ def remove_created_lock_state_if_empty(target: Path) -> None:
             path, "target lock", max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
         )
         path.unlink()
+    parent = lock_parent_dir(target)
+    if parent.exists() or parent.is_symlink():
+        require_lock_parent_directory(parent, "target lock parent", allow_locked=True)
+        if stat.S_IMODE(parent.lstat().st_mode) == LOCK_PARENT_HELD_MODE:
+            parent.chmod(OWNER_DIRECTORY_MODE)
+        with contextlib.suppress(FileNotFoundError, OSError):
+            parent.rmdir()
+    recover_legacy_lock_state(target)
     with contextlib.suppress(FileNotFoundError, OSError):
         control.rmdir()
 
@@ -522,17 +616,21 @@ def target_lock(target: Path, *, create: bool):
     remove_empty_target = create and not (target.exists() or target.is_symlink())
     descriptor: int | None = None
     locked_parent = False
+    restore_error: BaseException | None = None
     try:
         target = validate_target(target, create=create)
         if not create and not target.exists() and not target.is_symlink():
             fail("target is missing")
         descriptor = acquire_target_lock(target)
-        prepare_locked_control_root(target)
+        prepare_locked_lock_parent(target)
         locked_parent = True
         yield target
     finally:
         if locked_parent:
-            restore_unlocked_control_root(target)
+            try:
+                restore_unlocked_lock_parent(target)
+            except BaseException as exc:
+                restore_error = exc
         if descriptor is not None:
             with contextlib.suppress(OSError):
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -542,10 +640,18 @@ def target_lock(target: Path, *, create: bool):
             remove_created_lock_state_if_empty(target)
             remove_empty_directory_if_created(target, existed_before=False)
         remove_created_empty_directories(created_parent_chain)
+        if restore_error is not None:
+            raise restore_error
 
 
 def prune_empty_control_dirs(target: Path) -> None:
-    for directory in (control_tmp_dir(target), backup_pool(target), managed_control_dir(target)):
+    for directory in (
+        launch_image_dir(target),
+        control_tmp_dir(target),
+        backup_pool(target),
+        lock_parent_dir(target),
+        managed_control_dir(target),
+    ):
         with contextlib.suppress(FileNotFoundError, OSError):
             directory.rmdir()
 
@@ -1083,7 +1189,7 @@ def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
 
 
 def choose_backup_slot(pool: Path) -> int:
-    require_control_directory(pool.parent, "NDDev control root", allow_locked=True)
+    require_control_directory(pool.parent, "NDDev control root", allow_locked=False)
     ensure_private_directory(pool, "backup pool")
     for slot in range(10):
         if not (pool / str(slot)).exists():
@@ -1596,18 +1702,22 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
     data = read_software_file(path, f"Grok Build managed binary {path}")
     if sha256_bytes(data) != expected_sha256:
         fail("Grok Build managed binary digest changed before launch")
-    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=True)
-    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
+    ensure_private_directory(launch_image_dir(target), "Grok Build launch image directory")
     temporary_descriptor, temporary_name = tempfile.mkstemp(
-        prefix="launch.", dir=str(control_tmp_dir(target))
+        prefix="launch.", dir=str(launch_image_dir(target))
     )
     temporary = Path(temporary_name)
     descriptor: int | None = None
     try:
         os.write(temporary_descriptor, data)
-        os.fchmod(temporary_descriptor, OWNER_EXEC_MODE)
+        os.fchmod(temporary_descriptor, IMMUTABLE_EXEC_MODE)
         os.close(temporary_descriptor)
         temporary_descriptor = -1
+        launch_image_dir(target).chmod(LOCK_PARENT_HELD_MODE)
+        require_lock_parent_directory(
+            launch_image_dir(target), "Grok Build launch image directory", allow_locked=True
+        )
         flags = os.O_RDONLY
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
@@ -1615,7 +1725,10 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
             flags |= os.O_NOFOLLOW
         descriptor = os.open(temporary, flags)
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != OWNER_EXEC_MODE:
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != IMMUTABLE_EXEC_MODE
+        ):
             fail("Grok Build launch image is not a safe executable file")
         require_current_user_owner(opened, "Grok Build launch image")
         if sha256_file_descriptor(descriptor, max_bytes=SOFTWARE_MAX_BYTES) != expected_sha256:
@@ -1626,6 +1739,8 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
             os.close(descriptor)
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            launch_image_dir(target).chmod(OWNER_DIRECTORY_MODE)
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
         raise
@@ -2011,7 +2126,7 @@ def validate_safe_software_presence(target: Path) -> None:
 def run_vendor_installer(
     installer: bytes, installer_source: str, installer_sha256: str, target: Path
 ) -> dict[str, Any]:
-    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=True)
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
     ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
     with tempfile.TemporaryDirectory(
         prefix="installer.", dir=str(control_tmp_dir(target))
@@ -2369,6 +2484,10 @@ def launch(target: Path, child_args: list[str]) -> int:
         runtime_root = canonical / ".nddev-grok-build-runtime"
         home = runtime_root / "home"
         tmp = runtime_root / "tmp"
+        xdg_config = home / ".config"
+        xdg_cache = home / ".cache"
+        xdg_data = home / ".local" / "share"
+        xdg_state = home / ".local" / "state"
         create_missing_directories(missing_directory_chain(home))
         create_missing_directories(missing_directory_chain(tmp))
         require_private_directory(runtime_root, "Grok Build runtime root")
@@ -2387,6 +2506,10 @@ def launch(target: Path, child_args: list[str]) -> int:
             "GROK_TOOL_SEARCH": "1" if capabilities["tool_search"] else "0",
             "PATH": SAFE_SYSTEM_PATH,
             "TMPDIR": str(tmp),
+            "XDG_CACHE_HOME": str(xdg_cache),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "XDG_DATA_HOME": str(xdg_data),
+            "XDG_STATE_HOME": str(xdg_state),
         }
         for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"):
             value = os.environ.get(name)
@@ -2426,8 +2549,19 @@ def launch(target: Path, child_args: list[str]) -> int:
             return int(process.wait())
         finally:
             os.close(descriptor)
+            image_parent = launch_image.parent
+            if image_parent.exists() or image_parent.is_symlink():
+                require_lock_parent_directory(
+                    image_parent, "Grok Build launch image directory", allow_locked=True
+                )
+                image_parent.chmod(OWNER_DIRECTORY_MODE)
+                require_lock_parent_directory(
+                    image_parent, "Grok Build launch image directory", allow_locked=False
+                )
             with contextlib.suppress(FileNotFoundError):
                 launch_image.unlink()
+            with contextlib.suppress(FileNotFoundError, OSError):
+                image_parent.rmdir()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

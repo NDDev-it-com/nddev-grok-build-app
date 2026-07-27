@@ -40,6 +40,8 @@
   and deny concurrent setup mutations during managed launch.
 - Keep runtime state writable during managed launch by making only dedicated
   lock and launch-image directories non-writable.
+- Add a persistent fixed-system-temp bootstrap lock, acquired before target
+  inspection and held outside the child runtime tree through lifecycle cleanup.
 
 ### Removed
 

@@ -86,6 +86,14 @@
     "managed_symlinks_rejected": true,
     "managed_hardlinks_rejected": true,
     "sibling_lock_and_backup_state_ignored": true,
+    "external_bootstrap_lock_persistent": true,
+    "external_bootstrap_lock_not_under_target_or_parent": true,
+    "external_bootstrap_lock_uses_fixed_system_temp_root": true,
+    "external_bootstrap_lock_ignores_ambient_tmpdir": true,
+    "external_bootstrap_lock_json_binding": true,
+    "external_lock_acquired_before_target_inspection": true,
+    "external_lock_released_after_internal_lock": true,
+    "external_lock_not_exposed_to_child_env": true,
     "persistent_flock_lock_file": true,
     "control_root_stays_writable_while_locked": true,
     "lock_parent_non_writable_while_held": true,
@@ -108,7 +116,7 @@
     "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations": true,
     "launch_strips_provider_credentials": true,
     "no_ambient_provider_secrets": true,
-    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation, especially under sandbox off, is outside the cross-user isolation boundary"
+    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation of the target or bootstrap root, especially under sandbox off, is outside the cross-user isolation boundary"
   },
   "runtime_launch": {
     "command": "grok",

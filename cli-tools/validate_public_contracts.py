@@ -69,6 +69,7 @@ NPM_INTEGRITY = (
 NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
+METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_LIFECYCLE_KEYS = {
     "channel",
     "command",
@@ -115,11 +116,15 @@ BUILDER_SKILLS = {
 }
 FORBIDDEN_MANAGER_SOURCE_MARKERS = {
     "NDDEV_GROK_BUILD_TEST",
+    "NDDEV_GROK_BUILD_BOOTSTRAP",
+    "NDDEV_GROK_BUILD_LOCK",
     "ALLOW_TEST",
     "FAIL_AFTER",
     "TEST_INSTALLER",
     "TEST_PROBE",
     "TEST_TIMEOUT",
+    "BOOTSTRAP_ROOT_OVERRIDE",
+    "LOCK_ROOT_OVERRIDE",
     "installer_source_url",
     "internal_timeout_seconds",
 }
@@ -321,6 +326,11 @@ def validate_manager_source() -> None:
         "LOCK_PARENT_HELD_MODE = 0o500",
         "IMMUTABLE_EXEC_MODE = 0o500",
         'LOCK_DIR_NAME = "locks"',
+        "BOOTSTRAP_LOCK_NAMESPACE",
+        "def bootstrap_system_root()",
+        "def acquire_bootstrap_lock(",
+        "while offset < len(data)",
+        "bootstrap lock binding write made no progress",
     ):
         if marker not in source:
             raise ValueError(f"manager source is missing lock invariant marker: {marker}")
@@ -524,24 +534,308 @@ def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> N
         raise ValueError(f"unexpected manager JSON error: {payload}")
 
 
-def expect_cli_lock_error(argv: list[str], real_popen: Any) -> None:
-    current_popen = subprocess.Popen
+def close_fds_except(keep: set[int]) -> None:
     try:
-        subprocess.Popen = real_popen
-        completed = subprocess.run(
-            [sys.executable, str(ROOT / "cli-tools" / "nddev_grok_build.py"), *argv],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
+        limit = int(os.sysconf("SC_OPEN_MAX"))
+    except (AttributeError, OSError, ValueError):
+        limit = 256
+    start = 3
+    for fd in sorted(item for item in keep if item >= 3):
+        if start < fd:
+            os.closerange(start, fd)
+        start = fd + 1
+    if start < limit:
+        os.closerange(start, limit)
+
+
+def send_child_result(write_fd: int, payload: dict[str, Any]) -> None:
+    data = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    os.write(write_fd, data)
+
+
+def read_child_result(read_fd: int, pid: int, *, wait: bool = True) -> dict[str, Any]:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(read_fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if b"\n" in chunk:
+            break
+    if wait:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            raise ValueError(f"child process exited with status {status}")
+    payload = json.loads(b"".join(chunks).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("child result must be a JSON object")
+    return payload
+
+
+def fork_expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            close_fds_except({write_fd})
+            try:
+                callback()
+            except manager.GrokBuildSetupError as exc:
+                send_child_result(write_fd, {"ok": expected in str(exc), "error": str(exc)})
+            except BaseException as exc:
+                send_child_result(write_fd, {"ok": False, "error": repr(exc)})
+            else:
+                send_child_result(write_fd, {"ok": False, "error": "operation unexpectedly succeeded"})
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        payload = read_child_result(read_fd, pid)
+    finally:
+        os.close(read_fd)
+    if payload.get("ok") is not True:
+        raise ValueError(f"unexpected forked manager result: {payload}")
+
+
+def snapshot_file_digest(path: Path, size: int) -> str | None:
+    if size > METADATA_MAX_BYTES:
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > METADATA_MAX_BYTES:
+                return None
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def snapshot_path(path: Path) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {"exists": False}
+    mode = info.st_mode
+    if stat.S_ISDIR(mode):
+        kind = "directory"
+        digest = None
+        link_target = None
+    elif stat.S_ISREG(mode):
+        kind = "regular"
+        digest = snapshot_file_digest(path, info.st_size)
+        link_target = None
+    elif stat.S_ISLNK(mode):
+        kind = "symlink"
+        digest = None
+        link_target = os.readlink(path)
+    else:
+        kind = "other"
+        digest = None
+        link_target = None
+    return {
+        "exists": True,
+        "kind": kind,
+        "mode": stat.S_IMODE(mode),
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "nlink": info.st_nlink,
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+        "size": info.st_size,
+        "sha256": digest,
+        "link_target": link_target,
+    }
+
+
+def bootstrap_artifact_snapshot(manager: Any) -> Any:
+    system_root = Path("/tmp").resolve(strict=True)
+    root = manager.bootstrap_product_root_path(system_root)
+    root_snapshot = snapshot_path(root)
+    if root_snapshot.get("kind") != "directory":
+        return {"root": root_snapshot, "entries": ()}
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name):
+        entries.append((path.name, snapshot_path(path)))
+    return {"root": root_snapshot, "entries": tuple(entries)}
+
+
+@contextlib.contextmanager
+def isolated_bootstrap_root(manager: Any):
+    before = bootstrap_artifact_snapshot(manager)
+    original = manager.bootstrap_system_root
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-lock-root-") as tmp_raw:
+        root = Path(tmp_raw) / "system-tmp"
+        root.mkdir(mode=0o700)
+        root.chmod(0o1777)
+
+        def resolver() -> Path:
+            info = root.lstat()
+            if not stat.S_ISDIR(info.st_mode) or not (info.st_mode & stat.S_ISVTX):
+                raise ValueError("injected bootstrap root is not sticky")
+            return root
+
+        manager.bootstrap_system_root = resolver
+        try:
+            yield root
+        finally:
+            manager.bootstrap_system_root = original
+    after = bootstrap_artifact_snapshot(manager)
+    if after != before:
+        raise ValueError("public validator changed the real system bootstrap lock root")
+
+
+def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
+    identity = manager.bootstrap_target_identity(target)
+    descriptor = manager.acquire_bootstrap_lock(target)
+    path = manager.bootstrap_lock_path(identity)
+    initial = path.lstat()
+    start_read, start_write = os.pipe()
+    stop_read, stop_write = os.pipe()
+    result_read, result_write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(start_write)
+        os.close(stop_write)
+        os.close(result_read)
+        try:
+            close_fds_except({start_read, stop_read, result_write})
+            os.read(start_read, 1)
+            child_descriptor = manager.acquire_bootstrap_lock(target)
+            child_info = os.fstat(child_descriptor)
+            current = path.lstat()
+            send_child_result(
+                result_write,
+                {
+                    "ok": True,
+                    "fd": [child_info.st_dev, child_info.st_ino],
+                    "path": [current.st_dev, current.st_ino],
+                },
+            )
+            os.read(stop_read, 1)
+            manager.release_bootstrap_lock(child_descriptor)
+        except BaseException as exc:
+            send_child_result(result_write, {"ok": False, "error": repr(exc)})
+        finally:
+            os._exit(0)
+    os.close(start_read)
+    os.close(stop_read)
+    os.close(result_write)
+    try:
+        manager.release_bootstrap_lock(descriptor)
+        os.write(start_write, b"x")
+        os.close(start_write)
+        payload = read_child_result(result_read, pid, wait=False)
+        if payload.get("ok") is not True:
+            raise ValueError(f"bootstrap handover child failed: {payload}")
+        expected_inode = [initial.st_dev, initial.st_ino]
+        if payload.get("fd") != expected_inode or payload.get("path") != expected_inode:
+            raise ValueError("bootstrap lock handover did not keep the persistent inode")
+        fork_expect_manager_error(
+            manager,
+            lambda: manager.release_bootstrap_lock(manager.acquire_bootstrap_lock(target)),
+            "target is locked",
         )
     finally:
-        subprocess.Popen = current_popen
-    if completed.returncode != 2:
-        raise ValueError(f"expected locked CLI rc=2, got {completed.returncode}")
-    payload = json.loads(completed.stdout)
-    if "target is locked" not in str(payload.get("error", "")):
-        raise ValueError(f"unexpected locked CLI error: {payload}")
+        with contextlib.suppress(OSError):
+            os.write(stop_write, b"x")
+        with contextlib.suppress(OSError):
+            os.close(stop_write)
+        with contextlib.suppress(OSError):
+            os.close(result_read)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+    final_descriptor = manager.acquire_bootstrap_lock(target)
+    try:
+        final = path.lstat()
+        if (final.st_dev, final.st_ino) != (initial.st_dev, initial.st_ino):
+            raise ValueError("bootstrap lock inode changed after handover")
+    finally:
+        manager.release_bootstrap_lock(final_descriptor)
+
+
+def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
+    identity = manager.bootstrap_target_identity(target)
+    path = manager.bootstrap_lock_path(identity)
+
+    def write_raw_binding(data: bytes) -> None:
+        path.parent.mkdir(mode=manager.OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        path.parent.chmod(manager.OWNER_DIRECTORY_MODE)
+        path.write_bytes(data)
+        path.chmod(manager.OWNER_FILE_MODE)
+
+    variants = (
+        (b"{not json\n", "invalid JSON"),
+        (b"[]\n", "JSON object"),
+        (
+            manager.canonical_json(
+                manager.bootstrap_lock_binding(
+                    str(target.parent.resolve(strict=True) / "other-grok-home")
+                )
+            ),
+            "does not match",
+        ),
+    )
+    for payload, expected in variants:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        write_raw_binding(payload)
+        expect_manager_error(manager, lambda: manager.acquire_bootstrap_lock(target), expected)
+
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    original_write = manager.os.write
+    writes: list[int] = []
+
+    def short_write(descriptor: int, data: bytes) -> int:
+        amount = 1 if data else 0
+        written = original_write(descriptor, data[:amount])
+        writes.append(written)
+        return written
+
+    try:
+        manager.os.write = short_write
+        descriptor = manager.acquire_bootstrap_lock(target)
+    finally:
+        manager.os.write = original_write
+    try:
+        if len(writes) <= 1:
+            raise ValueError("bootstrap lock short-write regression did not force a write loop")
+        expected_bytes = manager.expected_bootstrap_lock_binding_bytes(identity)
+        with path.open("rb") as handle:
+            if handle.read() != expected_bytes:
+                raise ValueError("bootstrap lock short-write loop produced an invalid binding")
+    finally:
+        manager.release_bootstrap_lock(descriptor)
+
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    original_write = manager.os.write
+
+    def no_progress(_descriptor: int, _data: bytes) -> int:
+        return 0
+
+    try:
+        manager.os.write = no_progress
+        expect_manager_error(
+            manager, lambda: manager.acquire_bootstrap_lock(target), "made no progress"
+        )
+    finally:
+        manager.os.write = original_write
+    descriptor = manager.acquire_bootstrap_lock(target)
+    manager.release_bootstrap_lock(descriptor)
 
 
 def validate_fetch_error_smokes(manager: Any) -> None:
@@ -631,6 +925,8 @@ def validate_adversarial_smokes(manager: Any) -> None:
         if status["launchable"] or status.get("software_current") is not False:
             raise ValueError("status launchable must be false without current software")
 
+        validate_bootstrap_handover_smoke(manager, target)
+        validate_bootstrap_binding_smokes(manager, target)
         validate_restore_backup_smokes(manager, target, setup)
 
         denied = (
@@ -664,6 +960,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
                 control = manager.managed_control_dir(target)
                 lock_parent = manager.lock_parent_dir(target)
+                renamed_lock_parent = lock_parent.with_name(f"{lock_parent.name}.renamed")
                 lock = manager.lock_path(target)
                 control_mode = stat.S_IMODE(control.lstat().st_mode)
                 if control_mode != manager.OWNER_DIRECTORY_MODE:
@@ -688,10 +985,25 @@ def validate_adversarial_smokes(manager: Any) -> None:
                     pass
                 else:
                     raise ValueError("launch child could remove the held lock parent")
-                expect_cli_lock_error(["remove", "--target", str(target), "--json"], original_popen)
-                expect_cli_lock_error(
-                    ["switch", "--profile", "safe", "--target", str(target), "--json"],
-                    original_popen,
+                lock_parent.rename(renamed_lock_parent)
+                self.renamed_lock_parent = renamed_lock_parent
+                fork_expect_manager_error(
+                    manager,
+                    lambda: manager.remove_setup(target),
+                    "target is locked",
+                )
+                safe_profile = manager.load_profile("safe")
+                fork_expect_manager_error(
+                    manager,
+                    lambda: manager.write_setup(
+                        target, setup, safe_profile, require_existing=True
+                    ),
+                    "target is locked",
+                )
+                fork_expect_manager_error(
+                    manager,
+                    lambda: manager.write_setup(target, setup, profile),
+                    "target is locked",
                 )
                 launch_image = Path(command[0])
                 if launch_image.parent.resolve() != manager.launch_image_dir(target).resolve():
@@ -710,8 +1022,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 self.returncode = 0
 
             def wait(self) -> int:
-                if not manager.lock_path(target).is_file():
-                    raise ValueError("launch lock was released before child exit")
+                renamed_lock = self.renamed_lock_parent / manager.LOCK_FILE_NAME
+                if not renamed_lock.is_file():
+                    raise ValueError("renamed launch lock was released before child exit")
+                self.renamed_lock_parent.rename(manager.lock_parent_dir(target))
                 return self.returncode
 
             def kill(self) -> None:
@@ -933,6 +1247,34 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest transaction_policy missing")
     if transaction.get("existing_target_mode_required") != "0700":
         raise ValueError("manifest must require existing target mode 0700")
+    if not str(transaction.get("external_bootstrap_lock", "")).startswith(
+        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/"
+    ):
+        raise ValueError("manifest external bootstrap lock path must use fixed system temp root")
+    if "/private/tmp" not in str(
+        transaction.get("external_bootstrap_lock_system_root", "")
+    ) or "/tmp" not in str(transaction.get("external_bootstrap_lock_system_root", "")):
+        raise ValueError("manifest external bootstrap root must document macOS and Linux roots")
+    if transaction.get("external_bootstrap_lock_product_root_mode") != "0700":
+        raise ValueError("manifest external bootstrap product root mode mismatch")
+    if transaction.get("external_bootstrap_lock_file_mode") != "0600":
+        raise ValueError("manifest external bootstrap lock file mode mismatch")
+    if transaction.get("external_bootstrap_lock_persistent") is not True:
+        raise ValueError("manifest external bootstrap lock must be persistent")
+    if transaction.get("external_bootstrap_lock_unlinked_on_release") is not False:
+        raise ValueError("manifest external bootstrap lock must not be unlinked on release")
+    if "JSON" not in str(transaction.get("external_bootstrap_lock_binding", "")):
+        raise ValueError("manifest external bootstrap lock binding missing")
+    if "resolved real parent" not in str(
+        transaction.get("external_bootstrap_lock_target_identity", "")
+    ):
+        raise ValueError("manifest external bootstrap target identity mismatch")
+    if transaction.get("external_bootstrap_lock_from_ambient_tmpdir") is not False:
+        raise ValueError("manifest external bootstrap lock must ignore ambient TMPDIR")
+    if transaction.get("external_bootstrap_lock_child_env") is not False:
+        raise ValueError("manifest external bootstrap lock must not be exposed to child env")
+    if transaction.get("external_lock_acquired_before_target_inspection") is not True:
+        raise ValueError("manifest external lock must be acquired before target inspection")
     if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/locks/target.lock":
         raise ValueError("manifest lock must be target-internal")
     if transaction.get("lock_parent") != "$GROK_HOME/.nddev-grok-build/locks":
@@ -951,6 +1293,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest must require launch to hold the lock through child exit")
     if transaction.get("lock_crash_recovery") is not True:
         raise ValueError("manifest must declare lock crash recovery")
+    if transaction.get("lock_order") != (
+        "external bootstrap lock first, target-internal lock second; "
+        "release target-internal first, external last"
+    ):
+        raise ValueError("manifest lock ordering mismatch")
     if transaction.get("launch_requires_current_software") is not True:
         raise ValueError("manifest must require current software for launch")
     for key in (
@@ -989,6 +1336,14 @@ def main(argv: list[str] | None = None) -> int:
     for key in (
         "existing_target_private_mode_required",
         "sibling_lock_and_backup_state_ignored",
+        "external_bootstrap_lock_persistent",
+        "external_bootstrap_lock_not_under_target_or_parent",
+        "external_bootstrap_lock_uses_fixed_system_temp_root",
+        "external_bootstrap_lock_ignores_ambient_tmpdir",
+        "external_bootstrap_lock_json_binding",
+        "external_lock_acquired_before_target_inspection",
+        "external_lock_released_after_internal_lock",
+        "external_lock_not_exposed_to_child_env",
         "persistent_flock_lock_file",
         "control_root_stays_writable_while_locked",
         "lock_parent_non_writable_while_held",
@@ -1104,8 +1459,9 @@ def main(argv: list[str] | None = None) -> int:
         if not (ROOT / relative).is_file():
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
-    validate_adversarial_smokes(manager)
-    validate_fetch_error_smokes(manager)
+    with isolated_bootstrap_root(manager):
+        validate_adversarial_smokes(manager)
+        validate_fetch_error_smokes(manager)
     validate_workflows()
     validate_release_workflow(manifest, contract)
     print("validate_public_contracts.py: PASS")

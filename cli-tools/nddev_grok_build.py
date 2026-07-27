@@ -52,6 +52,8 @@ IMMUTABLE_EXEC_MODE = 0o500
 LOCK_PARENT_HELD_MODE = 0o500
 LOCK_DIR_NAME = "locks"
 LOCK_FILE_NAME = "target.lock"
+BOOTSTRAP_LOCK_SCHEMA_VERSION = 1
+BOOTSTRAP_LOCK_NAMESPACE = f"{PRODUCT_NAME}:bootstrap-lock:v1"
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
@@ -318,6 +320,219 @@ def remove_created_empty_directories(chain: list[Path]) -> None:
     for path in chain:
         with contextlib.suppress(FileNotFoundError, OSError):
             path.rmdir()
+
+
+def bootstrap_system_root() -> Path:
+    raw = Path("/tmp")
+    resolved = raw.resolve(strict=True)
+    info = stat_existing(resolved, "system bootstrap root")
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        fail("system bootstrap root must be a real directory")
+    if not (info.st_mode & stat.S_ISVTX):
+        fail("system bootstrap root must be sticky")
+    return resolved
+
+
+def bootstrap_product_root_path(system_root: Path) -> Path:
+    uid = effective_uid()
+    if uid is None:
+        fail("bootstrap locks require a POSIX effective uid")
+    return system_root / f".{PRODUCT_NAME}.uid-{uid}"
+
+
+def ensure_bootstrap_product_root() -> Path:
+    system_root = bootstrap_system_root()
+    product_root = bootstrap_product_root_path(system_root)
+    info = stat_existing(product_root, "bootstrap lock root")
+    if info is None:
+        try:
+            product_root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        else:
+            product_root.chmod(OWNER_DIRECTORY_MODE)
+    require_private_directory(product_root, "bootstrap lock root")
+    return product_root
+
+
+def bootstrap_target_identity(target: Path) -> str:
+    if not target.is_absolute():
+        fail("target must be an absolute path")
+    if target.name in ("", ".", ".."):
+        fail("target must name a directory")
+    parent = target.parent
+    require_safe_target_parent(parent, "target parent")
+    resolved_parent = parent.resolve(strict=True)
+    return str(resolved_parent / target.name)
+
+
+def bootstrap_lock_digest(identity: str) -> str:
+    payload = f"{BOOTSTRAP_LOCK_NAMESPACE}\n{identity}\n".encode("utf-8")
+    return sha256_bytes(payload)
+
+
+def bootstrap_lock_path(identity: str) -> Path:
+    return ensure_bootstrap_product_root() / bootstrap_lock_digest(identity)
+
+
+def bootstrap_lock_binding(identity: str) -> dict[str, Any]:
+    return {
+        "schema_version": BOOTSTRAP_LOCK_SCHEMA_VERSION,
+        "product_name": PRODUCT_NAME,
+        "namespace": BOOTSTRAP_LOCK_NAMESPACE,
+        "canonical_target": identity,
+        "lock_id": bootstrap_lock_digest(identity),
+    }
+
+
+def validate_bootstrap_lock_binding(value: Any, identity: str) -> None:
+    if not isinstance(value, dict):
+        fail("bootstrap lock binding must contain a JSON object")
+    expected = bootstrap_lock_binding(identity)
+    if set(value) != set(expected):
+        fail("bootstrap lock binding has invalid keys")
+    if value != expected:
+        fail("bootstrap lock binding does not match the target")
+
+
+def expected_bootstrap_lock_binding_bytes(identity: str) -> bytes:
+    data = canonical_json(bootstrap_lock_binding(identity))
+    if len(data) > METADATA_MAX_BYTES:
+        fail("bootstrap lock binding is too large")
+    return data
+
+
+def read_bootstrap_lock_binding(descriptor: int, identity: str) -> bytes | None:
+    size = os.fstat(descriptor).st_size
+    if size == 0:
+        return None
+    if size > METADATA_MAX_BYTES:
+        fail("bootstrap lock binding is too large")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    data = os.read(descriptor, METADATA_MAX_BYTES + 1)
+    if len(data) > METADATA_MAX_BYTES:
+        fail("bootstrap lock binding is too large")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"bootstrap lock binding is invalid JSON: {exc}")
+    validate_bootstrap_lock_binding(value, identity)
+    if data != expected_bootstrap_lock_binding_bytes(identity):
+        fail("bootstrap lock binding is not canonical")
+    return data
+
+
+def write_bootstrap_lock_binding(descriptor: int, identity: str) -> None:
+    data = expected_bootstrap_lock_binding_bytes(identity)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        if written <= 0:
+            fail("bootstrap lock binding write made no progress")
+        offset += written
+    os.ftruncate(descriptor, len(data))
+    os.fsync(descriptor)
+    current = read_bootstrap_lock_binding(descriptor, identity)
+    if current != data:
+        fail("bootstrap lock binding changed while writing")
+
+
+def require_bootstrap_lock_descriptor(descriptor: int, path: Path) -> os.stat_result:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode):
+        fail("bootstrap lock must be a regular file")
+    require_current_user_owner(opened, "bootstrap lock")
+    if opened.st_nlink != 1:
+        fail("bootstrap lock must not be a hardlink")
+    if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
+        fail("bootstrap lock must have mode 0600")
+    current = stat_existing(path, "bootstrap lock")
+    if current is None:
+        fail("bootstrap lock disappeared while opening")
+    if not stat.S_ISREG(current.st_mode):
+        fail("bootstrap lock must be a regular file")
+    require_current_user_owner(current, "bootstrap lock")
+    if current.st_nlink != 1:
+        fail("bootstrap lock must not be a hardlink")
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        fail("bootstrap lock changed while opening")
+    if stat.S_IMODE(current.st_mode) != OWNER_FILE_MODE:
+        fail("bootstrap lock must have mode 0600")
+    return opened
+
+
+def acquire_bootstrap_lock(target: Path) -> int:
+    identity = bootstrap_target_identity(target)
+    path = bootstrap_lock_path(identity)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    created = False
+    try:
+        descriptor = os.open(path, flags, OWNER_FILE_MODE)
+        created = True
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+    except FileExistsError:
+        flags = os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            fail(f"bootstrap lock must be a regular owner-private file: {exc}")
+    except OSError as exc:
+        fail(f"bootstrap lock must be a regular owner-private file: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            fail("bootstrap lock must be a regular file")
+        require_current_user_owner(opened, "bootstrap lock")
+        if opened.st_nlink != 1:
+            fail("bootstrap lock must not be a hardlink")
+        if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
+            fail("bootstrap lock must have mode 0600")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                fail(f"target is locked: {path}")
+            fail(f"bootstrap lock failed: {exc}")
+        opened = require_bootstrap_lock_descriptor(descriptor, path)
+        if read_bootstrap_lock_binding(descriptor, identity) is None:
+            write_bootstrap_lock_binding(descriptor, identity)
+            opened = require_bootstrap_lock_descriptor(descriptor, path)
+            if read_bootstrap_lock_binding(
+                descriptor, identity
+            ) != expected_bootstrap_lock_binding_bytes(identity):
+                fail("bootstrap lock binding changed after writing")
+        if created:
+            os.fsync(descriptor)
+        return descriptor
+    except BaseException:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+        raise
+
+
+def release_bootstrap_lock(descriptor: int) -> None:
+    with contextlib.suppress(OSError):
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    os.close(descriptor)
+
+
+@contextlib.contextmanager
+def bootstrap_lifecycle_lock(target: Path):
+    descriptor = acquire_bootstrap_lock(target)
+    try:
+        yield
+    finally:
+        release_bootstrap_lock(descriptor)
 
 
 def managed_control_dir(target: Path) -> Path:
@@ -612,12 +827,16 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
 
 @contextlib.contextmanager
 def target_lock(target: Path, *, create: bool):
-    created_parent_chain = missing_directory_chain(target.parent)
-    remove_empty_target = create and not (target.exists() or target.is_symlink())
+    created_parent_chain: list[Path] = []
+    remove_empty_target = False
+    bootstrap_descriptor: int | None = None
     descriptor: int | None = None
     locked_parent = False
     restore_error: BaseException | None = None
     try:
+        bootstrap_descriptor = acquire_bootstrap_lock(target)
+        created_parent_chain = missing_directory_chain(target.parent)
+        remove_empty_target = create and not (target.exists() or target.is_symlink())
         target = validate_target(target, create=create)
         if not create and not target.exists() and not target.is_symlink():
             fail("target is missing")
@@ -640,6 +859,8 @@ def target_lock(target: Path, *, create: bool):
             remove_created_lock_state_if_empty(target)
             remove_empty_directory_if_created(target, existed_before=False)
         remove_created_empty_directories(created_parent_chain)
+        if bootstrap_descriptor is not None:
+            release_bootstrap_lock(bootstrap_descriptor)
         if restore_error is not None:
             raise restore_error
 
@@ -1099,6 +1320,11 @@ def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 
 def status_payload(target: Path) -> dict[str, Any]:
+    with bootstrap_lifecycle_lock(target):
+        return status_payload_locked(target)
+
+
+def status_payload_locked(target: Path) -> dict[str, Any]:
     canonical = validate_target(target, create=False)
     if not target.exists():
         return {
@@ -1144,7 +1370,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "allowed_legacy_commands": ["status", "migrate", "restore", "remove"],
         }
     drift = drift_for_stamp(target, stamp)
-    software = software_status(target)
+    software = software_status_locked(target)
     return {
         "state": "managed",
         "managed": True,
@@ -1987,6 +2213,11 @@ def software_directory_mode_drift(path: Path, label: str) -> str | None:
 
 
 def software_status(target: Path) -> dict[str, Any]:
+    with bootstrap_lifecycle_lock(target):
+        return software_status_locked(target)
+
+
+def software_status_locked(target: Path) -> dict[str, Any]:
     canonical = validate_target(target, create=False)
     base: dict[str, Any] = {
         "schema_version": 1,
@@ -2214,7 +2445,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
     before_target_exists = target.exists() or target.is_symlink()
     with target_lock(target, create=command == "install-cli") as target:
         try:
-            status = software_status(target)
+            status = software_status_locked(target)
             if command == "install-cli" and status["present"]:
                 fail(
                     "install-cli requires absent target-owned Grok Build software presence; use update-cli"
@@ -2299,7 +2530,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 software_atomic_write(
                     software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
                 )
-                final_status = software_status(target)
+                final_status = software_status_locked(target)
                 if not final_status["installed"]:
                     fail(
                         "Grok Build software install did not produce structurally complete target-owned software"
@@ -2354,7 +2585,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
             if rollback_parent is not None:
                 with contextlib.suppress(FileNotFoundError):
                     shutil.rmtree(rollback_parent)
-            final_status = software_status(target)
+            final_status = software_status_locked(target)
             return {
                 "schema_version": 1,
                 "command": command,
@@ -2377,7 +2608,8 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
 
 
 def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
-    status = status_payload(target)
+    with bootstrap_lifecycle_lock(target):
+        status = status_payload_locked(target)
     operation = "install"
     backup_required = False
     if status["managed"]:
@@ -2464,14 +2696,14 @@ def launch(target: Path, child_args: list[str]) -> int:
     if mutation is not None:
         fail(f"launch denied for Grok Build managed-state mutation: {mutation}")
     with target_lock(target, create=False) as target:
-        status = status_payload(target)
+        status = status_payload_locked(target)
         if not status["managed"]:
             fail("launch requires a managed target")
         if status.get("legacy"):
             fail("launch denied for legacy managed state; run migrate, restore, or remove")
         if status["drift"]:
             fail(f"managed target has drift: {', '.join(status['drift'])}")
-        software = software_status(target)
+        software = software_status_locked(target)
         if not software["installed"] or not software["current"]:
             fail("launch requires current target-owned Grok Build software")
         software_stamp_value = load_software_stamp(target)

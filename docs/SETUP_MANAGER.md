@@ -18,9 +18,21 @@ state inside the same rollback-protected transaction.
 
 The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
 validated against `build/manifest.json`; do not duplicate it by hand.
-Manager mutations use a target-internal regular lock file at
-`$GROK_HOME/.nddev-grok-build/locks/target.lock`, opened with no-follow
-semantics, mode `0600`, and an exclusive `fcntl.flock` descriptor. While the
+
+Every target lifecycle operation first acquires a persistent external bootstrap
+lock under the fixed resolved system temp root, not under the target or
+`target.parent`. The product root is current-user-owned mode `0700`, and the
+persistent lock file is mode `0600`, no-follow opened, inode-checked, and named
+by the full SHA-256 of the product namespace plus canonical target identity.
+The binding JSON is written only after `LOCK_EX` is held and is never unlinked
+on normal release; crash recovery relies on kernel flock release over the same
+persistent path. The manager never derives this root from ambient `TMPDIR` and
+never exposes it to the launched child environment.
+
+After the external lock is held, manager mutations use a target-internal regular
+lock file at `$GROK_HOME/.nddev-grok-build/locks/target.lock`, opened with
+no-follow semantics, mode `0600`, and an exclusive `fcntl.flock` descriptor.
+Release order is target-internal first, external last. While the target-local
 lock is held, only the dedicated `locks/` parent is mode `0500`; the control
 root, backup pool, tmp directory, runtime `HOME`, runtime `TMPDIR`, XDG
 directories, and target root remain writable for the launched CLI. Stale
@@ -70,15 +82,15 @@ JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch holds the
-target-internal flock descriptor through the child process, verifies `bin/grok`,
-starts a private target-internal launch image under
+external bootstrap lock and target-internal flock descriptor through the child
+process, verifies `bin/grok`, starts a private target-internal launch image under
 `.nddev-grok-build/launch-images`, makes that launch-image directory
 non-writable while the child runs, immediately rechecks the image inode and
 digest, and removes the image after the child exits. Lifecycle, auth, plugin,
 marketplace, and MCP mutating subcommands are denied through managed launch.
 Cooperative same-user manager operations are serialized; direct malicious
-same-user mutation, especially under `full-auto` sandbox `off`, is outside the
-cross-user isolation boundary.
+same-user mutation of the target or bootstrap root, especially under `full-auto`
+sandbox `off`, is outside the cross-user isolation boundary.
 
 ## Legacy State
 

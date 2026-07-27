@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "id": "nddev-builder",
+  "display_name": "NDDev Builder",
+  "description": "Content setup for maximum documented Grok Build builder capabilities inside an isolated managed GROK_HOME.",
+  "default_profile": "full-auto",
+  "managed_capabilities": {
+    "memory": true,
+    "subagents": true,
+    "web_fetch": true,
+    "lsp_tools": true,
+    "write_file": true,
+    "tool_search": true
+  },
+  "native_marketplace": {
+    "source_path": "builder/nddev-builder/.grok-plugin/marketplace.json",
+    "target_path": "plugins/marketplaces/nddev-builder/.grok-plugin/marketplace.json",
+    "plugin_source_path": "builder/nddev-builder/plugins/nddev-builder",
+    "plugin_target_path": "plugins/nddev-builder",
+    "binary_delivery": false
+  }
+}

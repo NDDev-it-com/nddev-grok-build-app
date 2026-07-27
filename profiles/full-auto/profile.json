@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "display_name": "Full Auto",
+  "description": "Native always-approve permissions with the Grok sandbox disabled.",
+  "permission_mode": "always-approve",
+  "sandbox_profile": "off",
+  "managed_permission_rules": false
+}

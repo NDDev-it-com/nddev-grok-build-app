@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "display_name": "Safe",
+  "description": "Native ask permissions with the strict Grok sandbox.",
+  "permission_mode": "ask",
+  "sandbox_profile": "strict",
+  "managed_permission_rules": false
+}

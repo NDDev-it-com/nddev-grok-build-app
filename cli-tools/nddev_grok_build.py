@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -23,11 +24,19 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-grok-build-app"
 SETUP_ROOT = ROOT / "setups"
+PROFILE_ROOT = ROOT / "profiles"
 BUILDER_ROOT = ROOT / "builder" / "nddev-builder"
-SETUP_ORDER = ("safe", "balanced", "full-auto")
+CONTENT_SETUP_ORDER = ("nddev-builder",)
+PROFILE_ORDER = ("full-auto", "safe")
+LEGACY_SETUP_ORDER = ("safe", "balanced", "full-auto")
+DEFAULT_SETUP_ID = "nddev-builder"
+DEFAULT_PROFILE_ID = "full-auto"
 STAMP_NAME = "NDDEV-GROK-BUILD-SETUP.json"
 BACKUP_NAME = "NDDEV-GROK-BUILD-BACKUP.json"
 SOFTWARE_STAMP_NAME = "NDDEV-GROK-BUILD-SOFTWARE.json"
+STAMP_SCHEMA_VERSION = 2
+LEGACY_STAMP_SCHEMA_VERSION = 1
+SOFTWARE_STAMP_SCHEMA_VERSION = 2
 MANAGED_BEGIN = "# BEGIN NDDEV-GROK-BUILD MANAGED"
 MANAGED_END = "# END NDDEV-GROK-BUILD MANAGED"
 OWNER_FILE_MODE = 0o600
@@ -38,6 +47,13 @@ METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 GROK_COMMAND = "grok"
 GROK_VERSION = "0.2.112"
+GROK_CHANNEL = "stable"
+GROK_NPM_PACKAGE = "@xai-official/grok"
+GROK_NPM_INTEGRITY = (
+    "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
+)
+GROK_NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
+GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
 INTERNAL_INSTALLER_URL_ENV = "NDDEV_GROK_BUILD_TEST_INSTALLER_URL"
@@ -67,6 +83,7 @@ TARGET_SCOPE_FLAGS_WITH_VALUE = {
     "--disallowedTools",
     "--effort",
     "--model",
+    "--permission-mode",
     "--plugin-dir",
     "--ref",
     "--resume",
@@ -93,20 +110,14 @@ TARGET_SCOPE_FLAGS_NO_VALUE = {
     "--no-plan",
     "--no-subagents",
     "--oauth",
+    "--trust",
     "--yolo",
     "-c",
 }
-CONTENT_MANAGED_PATHS = (
-    "config.toml",
-    "AGENTS.md",
-    "skills/nddev-builder/SKILL.md",
-    "agents/nddev-builder.md",
-    "plugins/nddev-builder/plugin.json",
-    "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
-    "plugins/nddev-builder/agents/nddev-builder.md",
-)
+BASE_MANAGED_PATHS = ("config.toml", "AGENTS.md")
 MERGED_MARKER_PATHS = {"config.toml", "AGENTS.md"}
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+SUPPORTED_PLATFORM_SYSTEMS = {"Darwin", "Linux"}
 
 
 class GrokBuildSetupError(Exception):
@@ -335,21 +346,71 @@ def load_setup(setup_id: str) -> dict[str, Any]:
     return setup
 
 
+def load_profile(profile_id: str) -> dict[str, Any]:
+    if not SETUP_ID_PATTERN.fullmatch(profile_id):
+        fail(f"invalid profile id: {profile_id}")
+    path = PROFILE_ROOT / profile_id / "profile.json"
+    if not path.is_file():
+        if profile_id in LEGACY_SETUP_ORDER:
+            fail(f"legacy setup id is not a permission profile: {profile_id}")
+        fail(f"unknown profile: {profile_id}")
+    profile = read_json_file(path, max_bytes=METADATA_MAX_BYTES, label=f"profile {profile_id}")
+    if profile.get("id") != profile_id:
+        fail(f"profile id mismatch in {path}")
+    return profile
+
+
 def list_setups() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for setup_id in SETUP_ORDER:
+    for setup_id in CONTENT_SETUP_ORDER:
         setup = load_setup(setup_id)
         items.append(
             {
                 "id": setup["id"],
                 "display_name": setup["display_name"],
                 "description": setup["description"],
-                "permission_mode": setup["permission_mode"],
-                "sandbox_profile": setup["sandbox_profile"],
-                "nddev_builder_default": setup["nddev_builder_default"],
+                "default_profile": setup["default_profile"],
+                "managed_capabilities": setup["managed_capabilities"],
+                "native_marketplace": setup["native_marketplace"],
             }
         )
     return items
+
+
+def list_profiles() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for profile_id in PROFILE_ORDER:
+        profile = load_profile(profile_id)
+        items.append(
+            {
+                "id": profile["id"],
+                "display_name": profile["display_name"],
+                "description": profile["description"],
+                "permission_mode": profile["permission_mode"],
+                "sandbox_profile": profile["sandbox_profile"],
+            }
+        )
+    return items
+
+
+def is_legacy_stamp(stamp: dict[str, Any]) -> bool:
+    return stamp.get("schema_version") == LEGACY_STAMP_SCHEMA_VERSION
+
+
+def legacy_profile_for_setup(setup_id: str, requested_profile_id: str | None) -> str:
+    if requested_profile_id is not None:
+        return requested_profile_id
+    if setup_id == "safe":
+        return "safe"
+    if setup_id == "full-auto":
+        return "full-auto"
+    fail("legacy balanced setup has no supported native profile; pass --profile explicitly")
+
+
+def require_supported_runtime_platform() -> None:
+    system = platform.system()
+    if system not in SUPPORTED_PLATFORM_SYSTEMS:
+        fail(f"unsupported platform for nddev-grok-build-app runtime management: {system}")
 
 
 def extract_managed_block(text: str) -> str | None:
@@ -378,7 +439,9 @@ def merge_managed_block(existing: bytes | None, block: str) -> bytes:
     return text.replace(current, block).encode("utf-8")
 
 
-def render_config(setup: dict[str, Any]) -> str:
+def render_config(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> str:
+    marketplace_path = target / "plugins" / "marketplaces" / "nddev-builder"
+    capabilities = setup["managed_capabilities"]
     return (
         f"{MANAGED_BEGIN}\n"
         "# Managed by nddev-grok-build-app. Edit outside this block to preserve local state.\n"
@@ -389,25 +452,32 @@ def render_config(setup: dict[str, Any]) -> str:
         "\n"
         "[cli]\n"
         "auto_update = false\n"
+        f"channel = {toml_string(GROK_CHANNEL)}\n"
+        "\n"
+        "[session]\n"
+        "load_envrc = false\n"
         "\n"
         "[ui]\n"
-        f"permission_mode = {toml_string(setup['permission_mode'])}\n"
+        f"permission_mode = {toml_string(profile['permission_mode'])}\n"
         "remember_tool_approvals = false\n"
         'default_selected_permission = "allow_once"\n'
         'screen_mode = "fullscreen"\n'
         "\n"
         "[sandbox]\n"
-        f"profile = {toml_string(setup['sandbox_profile'])}\n"
+        f"profile = {toml_string(profile['sandbox_profile'])}\n"
         "auto_allow_bash = false\n"
         "\n"
         "[features]\n"
-        f"web_fetch = {toml_bool(bool(setup['web_fetch']))}\n"
-        f"write_file = {toml_bool(bool(setup['write_file']))}\n"
-        f"tool_search = {toml_bool(bool(setup['tool_search']))}\n"
-        f"lsp_tools = {toml_bool(bool(setup['lsp_tools']))}\n"
+        f"web_fetch = {toml_bool(bool(capabilities['web_fetch']))}\n"
+        f"write_file = {toml_bool(bool(capabilities['write_file']))}\n"
+        f"tool_search = {toml_bool(bool(capabilities['tool_search']))}\n"
+        f"lsp_tools = {toml_bool(bool(capabilities['lsp_tools']))}\n"
+        "\n"
+        "[memory]\n"
+        f"enabled = {toml_bool(bool(capabilities['memory']))}\n"
         "\n"
         "[subagents]\n"
-        f"enabled = {toml_bool(bool(setup['subagents_enabled']))}\n"
+        f"enabled = {toml_bool(bool(capabilities['subagents']))}\n"
         "\n"
         "[subagents.toggle]\n"
         "explore = true\n"
@@ -416,24 +486,26 @@ def render_config(setup: dict[str, Any]) -> str:
         "[plugins]\n"
         'enabled = ["nddev-builder"]\n'
         "\n"
-        "[permission]\n"
-        f"deny = {toml_array(list(setup['permission_deny']))}\n"
-        f"ask = {toml_array(list(setup['permission_ask']))}\n"
+        "[[marketplace.sources]]\n"
+        'name = "NDDev Builder"\n'
+        f"path = {toml_string(str(marketplace_path))}\n"
         f"{MANAGED_END}\n"
     )
 
 
-def render_agents_block(setup: dict[str, Any]) -> str:
+def render_agents_block(setup: dict[str, Any], profile: dict[str, Any]) -> str:
     return (
         f"{MANAGED_BEGIN}\n"
         "# Managed by nddev-grok-build-app. Edit outside this block to preserve local rules.\n"
         "\n"
         "# NDDev Grok Build Setup\n"
         "\n"
-        f"This Grok Build home is managed as the `{setup['id']}` setup by nddev-grok-build-app.\n"
+        "This Grok Build home is managed by nddev-grok-build-app with content setup "
+        f"`{setup['id']}` and permission profile `{profile['id']}`.\n"
         "Use only current Grok Build surfaces documented by xAI: `AGENTS.md`, `.grok/rules/`,\n"
         "`$GROK_HOME/skills/`, `$GROK_HOME/agents/`, hooks, MCP configuration, and plugins.\n"
-        "Do not use stale Grok Build command identities or unsupported marketplace assumptions.\n"
+        "The NDDev Builder plugin is exposed through a target-local Grok marketplace and trusted\n"
+        "target-local plugin files. Do not use plugins to deliver native binaries or runtimes.\n"
         f"{MANAGED_END}\n"
     )
 
@@ -448,24 +520,58 @@ def builder_source(relative: str) -> bytes:
     return data
 
 
-def desired_files(target: Path, setup: dict[str, Any]) -> dict[str, bytes]:
+def builder_tree(relative_root: str) -> dict[str, bytes]:
+    root = BUILDER_ROOT / relative_root
+    if not root.is_dir():
+        fail(f"builder source directory missing: {relative_root}")
+    files: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        info = stat_existing(path, f"builder source {relative_root}/{relative}")
+        if info is None:
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"builder source must be a regular file: {relative_root}/{relative}")
+        if info.st_size > MANAGED_MAX_BYTES:
+            fail(f"builder source too large: {relative_root}/{relative}")
+        files[relative] = path.read_bytes()
+    return files
+
+
+def content_managed_paths() -> tuple[str, ...]:
+    paths = list(BASE_MANAGED_PATHS)
+    plugin_files = builder_tree("plugins/nddev-builder")
+    for relative in plugin_files:
+        paths.append(f"plugins/nddev-builder/{relative}")
+        paths.append(f"plugins/marketplaces/nddev-builder/plugins/nddev-builder/{relative}")
+        if relative.startswith(("skills/", "agents/")):
+            paths.append(relative)
+    for relative in builder_tree(".grok-plugin"):
+        paths.append(f"plugins/marketplaces/nddev-builder/.grok-plugin/{relative}")
+    return tuple(dict.fromkeys(paths))
+
+
+def desired_files(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, bytes]:
     existing_config = read_existing_file(
         target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml"
     )
     existing_agents = read_existing_file(
         target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md"
     )
-    skill = builder_source("skills/nddev-builder/SKILL.md")
-    agent = builder_source("agents/nddev-builder.md")
-    return {
-        "config.toml": merge_managed_block(existing_config, render_config(setup)),
-        "AGENTS.md": merge_managed_block(existing_agents, render_agents_block(setup)),
-        "skills/nddev-builder/SKILL.md": skill,
-        "agents/nddev-builder.md": agent,
-        "plugins/nddev-builder/plugin.json": builder_source("plugin.json"),
-        "plugins/nddev-builder/skills/nddev-builder/SKILL.md": skill,
-        "plugins/nddev-builder/agents/nddev-builder.md": agent,
+    files = {
+        "config.toml": merge_managed_block(existing_config, render_config(target, setup, profile)),
+        "AGENTS.md": merge_managed_block(existing_agents, render_agents_block(setup, profile)),
     }
+    for relative, data in builder_tree("plugins/nddev-builder").items():
+        files[f"plugins/nddev-builder/{relative}"] = data
+        files[f"plugins/marketplaces/nddev-builder/plugins/nddev-builder/{relative}"] = data
+        if relative.startswith(("skills/", "agents/")):
+            files[relative] = data
+    for relative, data in builder_tree(".grok-plugin").items():
+        files[f"plugins/marketplaces/nddev-builder/.grok-plugin/{relative}"] = data
+    return files
 
 
 def managed_digest_for_bytes(relative: str, data: bytes) -> str:
@@ -501,6 +607,13 @@ def read_stamp(target: Path) -> dict[str, Any] | None:
     canonical = str(validate_target(target, create=False))
     if stamp.get("canonical_target") != canonical:
         fail("stamp is bound to a different canonical target")
+    schema = stamp.get("schema_version")
+    if schema not in {LEGACY_STAMP_SCHEMA_VERSION, STAMP_SCHEMA_VERSION}:
+        fail("stamp schema version is unsupported")
+    if not isinstance(stamp.get("setup_id"), str):
+        fail("stamp setup_id is invalid")
+    if schema == STAMP_SCHEMA_VERSION and not isinstance(stamp.get("profile_id"), str):
+        fail("stamp profile_id is invalid")
     return stamp
 
 
@@ -526,6 +639,10 @@ def status_payload(target: Path) -> dict[str, Any]:
             "managed": False,
             "canonical_target": str(canonical),
             "setup_id": None,
+            "profile_id": None,
+            "schema_version": None,
+            "legacy": False,
+            "launchable": False,
             "drift": [],
         }
     require_real_directory(target, "target")
@@ -536,22 +653,51 @@ def status_payload(target: Path) -> dict[str, Any]:
             "managed": False,
             "canonical_target": str(canonical),
             "setup_id": None,
+            "profile_id": None,
+            "schema_version": None,
+            "legacy": False,
+            "launchable": False,
             "drift": [],
+        }
+    if is_legacy_stamp(stamp):
+        return {
+            "state": "legacy-managed",
+            "managed": True,
+            "canonical_target": str(canonical),
+            "setup_id": stamp["setup_id"],
+            "profile_id": None,
+            "schema_version": stamp["schema_version"],
+            "legacy": True,
+            "launchable": False,
+            "build_version": stamp["build_version"],
+            "drift": drift_for_stamp(target, stamp),
+            "managed_files": sorted(stamp["managed_files"]),
+            "migration_required": True,
+            "allowed_legacy_commands": ["status", "migrate", "restore", "remove"],
         }
     return {
         "state": "managed",
         "managed": True,
         "canonical_target": str(canonical),
         "setup_id": stamp["setup_id"],
+        "profile_id": stamp["profile_id"],
+        "schema_version": stamp["schema_version"],
+        "legacy": False,
+        "launchable": True,
         "build_version": stamp["build_version"],
         "drift": drift_for_stamp(target, stamp),
         "managed_files": sorted(stamp["managed_files"]),
     }
 
 
-def snapshot_files(target: Path) -> dict[str, bytes | None]:
+def snapshot_files(
+    target: Path, extra_paths: tuple[str, ...] | list[str] | None = None
+) -> dict[str, bytes | None]:
     snapshot: dict[str, bytes | None] = {}
-    for relative in (*CONTENT_MANAGED_PATHS, STAMP_NAME):
+    paths = list(content_managed_paths())
+    if extra_paths is not None:
+        paths.extend(extra_paths)
+    for relative in (*tuple(dict.fromkeys(paths)), STAMP_NAME):
         snapshot[relative] = read_existing_file(
             safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
         )
@@ -586,18 +732,21 @@ def create_backup(target: Path, stamp: dict[str, Any]) -> int:
         shutil.rmtree(slot_dir)
     slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
     files: dict[str, Any] = {}
-    for relative in (*CONTENT_MANAGED_PATHS, STAMP_NAME):
+    managed_paths = sorted(stamp.get("managed_files", {}))
+    for relative in (*managed_paths, STAMP_NAME):
         data = read_existing_file(
             safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
         )
         files[relative] = None if data is None else base64.b64encode(data).decode("ascii")
     envelope = {
-        "schema_version": 1,
+        "schema_version": STAMP_SCHEMA_VERSION,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "slot": slot,
         "canonical_target": str(validate_target(target, create=False)),
         "source_setup_id": stamp["setup_id"],
+        "source_profile_id": stamp.get("profile_id"),
+        "source_stamp_schema": stamp.get("schema_version"),
         "created_at": int(time.time()),
         "files": files,
     }
@@ -605,22 +754,29 @@ def create_backup(target: Path, stamp: dict[str, Any]) -> int:
     return slot
 
 
-def build_stamp(target: Path, setup_id: str, files: dict[str, bytes]) -> dict[str, Any]:
+def build_stamp(
+    target: Path, setup_id: str, profile_id: str, files: dict[str, bytes]
+) -> dict[str, Any]:
     managed = {
         relative: managed_digest_for_bytes(relative, data) for relative, data in files.items()
     }
     return {
-        "schema_version": 1,
+        "schema_version": STAMP_SCHEMA_VERSION,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "canonical_target": str(validate_target(target, create=False)),
         "managed_files": managed,
     }
 
 
 def write_setup(
-    target: Path, setup: dict[str, Any], *, require_existing: bool = False
+    target: Path,
+    setup: dict[str, Any],
+    profile: dict[str, Any],
+    *,
+    require_existing: bool = False,
 ) -> dict[str, Any]:
     with target_lock(target):
         validate_target(target, create=True)
@@ -628,18 +784,22 @@ def write_setup(
         if require_existing and current is None:
             fail("switch requires an already managed target")
         if current is not None:
+            if is_legacy_stamp(current):
+                fail("target uses legacy managed state; run migrate, restore, or remove")
             drift = drift_for_stamp(target, current)
             if drift:
                 fail(f"managed target has drift: {', '.join(drift)}")
-        files = desired_files(target, setup)
-        desired_stamp = build_stamp(target, setup["id"], files)
+        files = desired_files(target, setup, profile)
+        desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
         changed = [
             relative
             for relative, data in files.items()
             if current_managed_digest(target, relative) != managed_digest_for_bytes(relative, data)
         ]
         backup_slot = None
-        if current is not None and current["setup_id"] != setup["id"]:
+        if current is not None and (
+            current["setup_id"] != setup["id"] or current["profile_id"] != profile["id"]
+        ):
             backup_slot = create_backup(target, current)
         snapshot = snapshot_files(target)
         try:
@@ -651,7 +811,45 @@ def write_setup(
             raise
         return {
             "setup_id": setup["id"],
+            "profile_id": profile["id"],
             "changed": changed,
+            "backup_slot": backup_slot,
+            "target": str(validate_target(target, create=False)),
+        }
+
+
+def migrate_setup(
+    target: Path,
+    setup: dict[str, Any],
+    requested_profile_id: str | None,
+) -> dict[str, Any]:
+    with target_lock(target):
+        validate_target(target, create=True)
+        current = read_stamp(target)
+        if current is None:
+            fail("migrate requires a managed legacy target")
+        if not is_legacy_stamp(current):
+            fail("target is already using the current setup/profile stamp schema")
+        drift = drift_for_stamp(target, current)
+        if drift:
+            fail(f"managed target has drift: {', '.join(drift)}")
+        profile_id = legacy_profile_for_setup(current["setup_id"], requested_profile_id)
+        profile = load_profile(profile_id)
+        backup_slot = create_backup(target, current)
+        files = desired_files(target, setup, profile)
+        desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
+        snapshot = snapshot_files(target, extra_paths=sorted(current["managed_files"]))
+        try:
+            for relative, data in files.items():
+                atomic_write(safe_target_path(target, relative), data, target)
+            atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
+        except BaseException:
+            restore_snapshot(target, snapshot)
+            raise
+        return {
+            "setup_id": setup["id"],
+            "profile_id": profile["id"],
+            "source_legacy_setup_id": current["setup_id"],
             "backup_slot": backup_slot,
             "target": str(validate_target(target, create=False)),
         }
@@ -671,9 +869,9 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         files = envelope.get("files")
         if not isinstance(files, dict):
             fail("backup files are invalid")
-        snapshot = snapshot_files(target)
+        snapshot = snapshot_files(target, extra_paths=sorted(files))
         try:
-            for relative in (*CONTENT_MANAGED_PATHS, STAMP_NAME):
+            for relative in sorted(files):
                 encoded = files.get(relative)
                 path = safe_target_path(target, relative)
                 if encoded is None:
@@ -690,6 +888,8 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         restored_stamp = read_stamp(target)
         return {
             "setup_id": None if restored_stamp is None else restored_stamp["setup_id"],
+            "profile_id": None if restored_stamp is None else restored_stamp.get("profile_id"),
+            "legacy": False if restored_stamp is None else is_legacy_stamp(restored_stamp),
             "backup_slot": slot,
             "target": str(validate_target(target, create=False)),
         }
@@ -705,9 +905,10 @@ def remove_setup(target: Path) -> dict[str, Any]:
         if drift:
             fail(f"managed target has drift: {', '.join(drift)}")
         removed_setup_id = stamp["setup_id"]
-        snapshot = snapshot_files(target)
+        removed_profile_id = stamp.get("profile_id")
+        snapshot = snapshot_files(target, extra_paths=sorted(stamp["managed_files"]))
         try:
-            for relative in CONTENT_MANAGED_PATHS:
+            for relative in sorted(stamp["managed_files"]):
                 path = safe_target_path(target, relative)
                 if relative in MERGED_MARKER_PATHS:
                     remove_managed_block_from_target(target, relative)
@@ -722,6 +923,8 @@ def remove_setup(target: Path) -> dict[str, Any]:
             raise
         return {
             "removed_setup_id": removed_setup_id,
+            "removed_profile_id": removed_profile_id,
+            "removed_legacy": is_legacy_stamp(stamp),
             "target": str(validate_target(target, create=False)),
         }
 
@@ -744,7 +947,7 @@ def remove_managed_block_from_target(target: Path, relative: str) -> None:
 
 def prune_empty_managed_dirs(target: Path) -> None:
     candidates: set[Path] = set()
-    for relative in CONTENT_MANAGED_PATHS:
+    for relative in content_managed_paths():
         directory = safe_target_path(target, relative).parent
         while directory != target and target in directory.parents:
             candidates.add(directory)
@@ -1021,14 +1224,21 @@ def software_stamp(
     version_output: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": SOFTWARE_STAMP_SCHEMA_VERSION,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "canonical_target": str(validate_target(target, create=False)),
         "command": GROK_COMMAND,
         "version": GROK_VERSION,
+        "channel": GROK_CHANNEL,
         "installer_url": installer_source,
         "installer_sha256": installer_sha256,
+        "installer_exact_version_arg": GROK_VERSION,
+        "npm_package": GROK_NPM_PACKAGE,
+        "npm_version": GROK_VERSION,
+        "npm_integrity": GROK_NPM_INTEGRITY,
+        "npm_shasum": GROK_NPM_SHASUM,
+        "npm_tarball": GROK_NPM_TARBALL,
         "binary_sha256": binary_sha256,
         "version_output": version_output,
         "installed_at": int(time.time()),
@@ -1069,8 +1279,15 @@ def load_software_stamp(
         "canonical_target",
         "command",
         "version",
+        "channel",
         "installer_url",
         "installer_sha256",
+        "installer_exact_version_arg",
+        "npm_package",
+        "npm_version",
+        "npm_integrity",
+        "npm_shasum",
+        "npm_tarball",
         "binary_sha256",
         "version_output",
         "installed_at",
@@ -1079,7 +1296,7 @@ def load_software_stamp(
         if set(value) != required:
             fail("Grok Build software stamp has invalid keys")
         if (
-            value["schema_version"] != 1
+            value["schema_version"] != SOFTWARE_STAMP_SCHEMA_VERSION
             or value["product_name"] != PRODUCT_NAME
             or value["canonical_target"] != str(validate_target(target, create=False))
             or value["command"] != GROK_COMMAND
@@ -1092,6 +1309,16 @@ def load_software_stamp(
                 fail(f"Grok Build software stamp {digest_key} must be a SHA-256 digest")
         if not isinstance(value["version"], str):
             fail("Grok Build software stamp version is invalid")
+        if (
+            value["channel"] != GROK_CHANNEL
+            or value["installer_exact_version_arg"] != GROK_VERSION
+            or value["npm_package"] != GROK_NPM_PACKAGE
+            or value["npm_version"] != GROK_VERSION
+            or value["npm_integrity"] != GROK_NPM_INTEGRITY
+            or value["npm_shasum"] != GROK_NPM_SHASUM
+            or value["npm_tarball"] != GROK_NPM_TARBALL
+        ):
+            fail("Grok Build software stamp provenance is invalid")
         if (
             not isinstance(value["version_output"], str)
             or GROK_VERSION not in value["version_output"]
@@ -1212,8 +1439,15 @@ def software_status(target: Path) -> dict[str, Any]:
         expected = {
             "build_version": VERSION,
             "version": GROK_VERSION,
+            "channel": GROK_CHANNEL,
             "installer_url": INSTALLER_URL,
             "installer_sha256": INSTALLER_SHA256,
+            "installer_exact_version_arg": GROK_VERSION,
+            "npm_package": GROK_NPM_PACKAGE,
+            "npm_version": GROK_VERSION,
+            "npm_integrity": GROK_NPM_INTEGRITY,
+            "npm_shasum": GROK_NPM_SHASUM,
+            "npm_tarball": GROK_NPM_TARBALL,
         }
         for key, expected_value in expected.items():
             if stamp[key] != expected_value:
@@ -1273,7 +1507,7 @@ def run_vendor_installer(
                 "HOME": str(home),
                 "GROK_HOME": str(grok_home),
                 "GROK_BIN_DIR": str(bin_dir),
-                "GROK_CHANNEL": "stable",
+                "GROK_CHANNEL": GROK_CHANNEL,
                 "SHELL": "",
             }
         )
@@ -1335,6 +1569,7 @@ def run_vendor_installer(
 
 
 def install_grok_software(target: Path, command: str) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with target_lock(target):
         before_target_exists = target.exists() or target.is_symlink()
         validate_target(target, create=True)
@@ -1518,18 +1753,29 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
             raise
 
 
-def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
+def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     status = status_payload(target)
     operation = "install"
     backup_required = False
     if status["managed"]:
-        operation = "update" if status["setup_id"] == setup["id"] else "switch"
-        backup_required = status["setup_id"] != setup["id"]
+        if status.get("legacy"):
+            operation = "migrate"
+            backup_required = True
+        else:
+            operation = (
+                "update"
+                if status["setup_id"] == setup["id"] and status["profile_id"] == profile["id"]
+                else "switch"
+            )
+            backup_required = status["setup_id"] != setup["id"] or status["profile_id"] != profile["id"]
     return {
         "operation": operation,
         "setup_id": setup["id"],
+        "profile_id": profile["id"],
         "target": str(validate_target(target, create=False)),
         "current_setup_id": status["setup_id"],
+        "current_profile_id": status["profile_id"],
+        "current_schema_version": status["schema_version"],
         "drift": status["drift"],
         "backup_required": backup_required,
         "mutates": False,
@@ -1551,6 +1797,7 @@ def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:
 
 
 def launch(target: Path, child_args: list[str]) -> int:
+    require_supported_runtime_platform()
     override = child_args_use_target_scope_overrides(child_args)
     if override is not None:
         fail(f"launch child arguments must not override target-owned Grok Build scope: {override}")
@@ -1558,12 +1805,16 @@ def launch(target: Path, child_args: list[str]) -> int:
         status = status_payload(target)
         if not status["managed"]:
             fail("launch requires a managed target")
+        if status.get("legacy"):
+            fail("launch denied for legacy managed state; run migrate, restore, or remove")
         if status["drift"]:
             fail(f"managed target has drift: {', '.join(status['drift'])}")
         software = software_status(target)
         if not software["installed"] or not software["current"]:
             fail("launch requires current target-owned Grok Build software")
         setup = load_setup(str(status["setup_id"]))
+        profile = load_profile(str(status["profile_id"]))
+        capabilities = setup["managed_capabilities"]
         canonical = validate_target(target, create=False)
         runtime_root = canonical / ".nddev-grok-build-runtime"
         home = runtime_root / "home"
@@ -1578,10 +1829,13 @@ def launch(target: Path, child_args: list[str]) -> int:
             "HOME": str(home),
             "GROK_HOME": str(canonical),
             "GROK_DISABLE_AUTOUPDATER": "1",
-            "GROK_SANDBOX": str(setup["sandbox_profile"]),
-            "GROK_SUBAGENTS": "1" if setup["subagents_enabled"] else "0",
-            "GROK_WEB_FETCH": "1" if setup["web_fetch"] else "0",
-            "GROK_MEMORY": "0",
+            "GROK_SANDBOX": str(profile["sandbox_profile"]),
+            "GROK_SUBAGENTS": "1" if capabilities["subagents"] else "0",
+            "GROK_WEB_FETCH": "1" if capabilities["web_fetch"] else "0",
+            "GROK_MEMORY": "1" if capabilities["memory"] else "0",
+            "GROK_LSP_TOOLS": "1" if capabilities["lsp_tools"] else "0",
+            "GROK_WRITE_FILE": "1" if capabilities["write_file"] else "0",
+            "GROK_TOOL_SEARCH": "1" if capabilities["tool_search"] else "0",
             "PATH": SAFE_SYSTEM_PATH,
             "TMPDIR": str(tmp),
         }
@@ -1606,9 +1860,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("--json", action="store_true")
     for name in ("plan", "install", "switch"):
         command = subparsers.add_parser(name)
-        command.add_argument("--setup", required=True)
+        command.add_argument("--setup", default=DEFAULT_SETUP_ID)
+        command.add_argument("--profile", default=DEFAULT_PROFILE_ID)
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
+    migrate = subparsers.add_parser("migrate")
+    migrate.add_argument("--setup", default=DEFAULT_SETUP_ID)
+    migrate.add_argument("--profile")
+    migrate.add_argument("--target", required=True)
+    migrate.add_argument("--json", action="store_true")
     restore = subparsers.add_parser("restore")
     restore.add_argument("--backup", required=True, type=int)
     restore.add_argument("--target", required=True)
@@ -1627,7 +1887,19 @@ def emit(payload: dict[str, Any], *, as_json: bool) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     if args.command == "list":
         items = list_setups()
-        emit({"setups": [item["id"] for item in items], "items": items}, as_json=args.json)
+        profiles = list_profiles()
+        emit(
+            {
+                "setups": [item["id"] for item in items],
+                "profiles": [item["id"] for item in profiles],
+                "default_setup": DEFAULT_SETUP_ID,
+                "default_profile": DEFAULT_PROFILE_ID,
+                "items": items,
+                "profile_items": profiles,
+                "legacy_setups": list(LEGACY_SETUP_ORDER),
+            },
+            as_json=args.json,
+        )
         return 0
     if args.command == "status":
         emit(status_payload(require_absolute_target(args.target)), as_json=args.json)
@@ -1637,15 +1909,27 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
-        emit(plan_payload(target, load_setup(args.setup)), as_json=args.json)
+        emit(plan_payload(target, load_setup(args.setup), load_profile(args.profile)), as_json=args.json)
         return 0
     if args.command == "install":
         target = require_absolute_target(args.target)
-        emit(write_setup(target, load_setup(args.setup)), as_json=args.json)
+        emit(write_setup(target, load_setup(args.setup), load_profile(args.profile)), as_json=args.json)
         return 0
     if args.command == "switch":
         target = require_absolute_target(args.target)
-        emit(write_setup(target, load_setup(args.setup), require_existing=True), as_json=args.json)
+        emit(
+            write_setup(
+                target,
+                load_setup(args.setup),
+                load_profile(args.profile),
+                require_existing=True,
+            ),
+            as_json=args.json,
+        )
+        return 0
+    if args.command == "migrate":
+        target = require_absolute_target(args.target)
+        emit(migrate_setup(target, load_setup(args.setup), args.profile), as_json=args.json)
         return 0
     if args.command == "restore":
         target = require_absolute_target(args.target)

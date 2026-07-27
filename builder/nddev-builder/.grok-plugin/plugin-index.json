@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "plugins": {
+    "nddev-builder": {
+      "components": {
+        "skills": [
+          {
+            "name": "nddev-builder",
+            "description": "Route Grok Build artifact work to focused NDDev Builder skills."
+          },
+          {
+            "name": "grok-config-profile",
+            "description": "Create or review Grok Build config ownership and setup/profile separation."
+          },
+          {
+            "name": "grok-permissions-sandbox",
+            "description": "Create or review permission and sandbox profiles."
+          },
+          {
+            "name": "grok-agents-subagents",
+            "description": "Create or review agents, subagents, roles, personas, and MCP inheritance."
+          },
+          {
+            "name": "grok-skills-instructions",
+            "description": "Create or review skills and instruction files."
+          },
+          {
+            "name": "grok-plugins-marketplace",
+            "description": "Create or review plugins and native local marketplaces."
+          },
+          {
+            "name": "grok-hooks",
+            "description": "Create or review hooks, events, trust, and script contracts."
+          },
+          {
+            "name": "grok-mcp",
+            "description": "Create or review MCP server configuration."
+          },
+          {
+            "name": "grok-install-lifecycle",
+            "description": "Review installer, target-owned runtime, migration, rollback, and launch lifecycle."
+          },
+          {
+            "name": "grok-creator-checker-release",
+            "description": "Create, check, and prepare public Grok Build artifacts for release validation."
+          }
+        ],
+        "agents": [
+          {
+            "name": "nddev-builder",
+            "description": "Review Grok Build-native setup artifacts and builder bundles."
+          }
+        ]
+      }
+    }
+  }
+}

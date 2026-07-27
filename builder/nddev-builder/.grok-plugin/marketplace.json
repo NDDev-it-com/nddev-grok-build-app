@@ -1,0 +1,19 @@
+{
+  "name": "NDDev Builder",
+  "description": "Local NDDev Builder marketplace for Grok Build-native skills, agents, hooks, MCP configuration, and plugins.",
+  "owner": {
+    "name": "NDDev"
+  },
+  "plugins": [
+    {
+      "name": "nddev-builder",
+      "version": "0.2.0",
+      "description": "Build and review Grok Build-native builder artifacts.",
+      "category": "development",
+      "source": {
+        "type": "local",
+        "path": "../plugins/nddev-builder"
+      }
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -1130,6 +1131,7 @@ def validate_builder_toolkit(build_version: str) -> None:
         text = skill_path.read_text(encoding="utf-8")
         if f"name: {skill}" not in text:
             raise ValueError(f"{skill_path.relative_to(ROOT)}: frontmatter name mismatch")
+        validate_skill_local_references(plugin_root, skill_path, text)
 
     entry = (plugin_root / "skills" / "nddev-builder" / "SKILL.md").read_text(encoding="utf-8")
     for reference in ("references/native-surfaces.md", "references/validation-workflows.md"):
@@ -1200,6 +1202,27 @@ def validate_release_workflow(manifest: dict[str, Any], contract: dict[str, Any]
     missing_runtime = required_runtime - runtime_paths
     if missing_runtime:
         raise ValueError(f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}")
+
+
+def validate_skill_local_references(plugin_root: Path, skill_path: Path, text: str) -> None:
+    plugin_real = plugin_root.resolve()
+    for reference in re.findall(r"`([^`]+)`", text):
+        if not reference.endswith(".md"):
+            continue
+        if not (
+            reference.startswith("../")
+            or reference.startswith("references/")
+        ):
+            continue
+        candidate = (skill_path.parent / reference).resolve()
+        if candidate != plugin_real and plugin_real not in candidate.parents:
+            raise ValueError(
+                f"{skill_path.relative_to(ROOT)}: routed reference escapes plugin root: {reference}"
+            )
+        if not candidate.is_file():
+            raise ValueError(
+                f"{skill_path.relative_to(ROOT)}: routed reference is missing: {reference}"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

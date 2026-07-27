@@ -20,7 +20,7 @@ Checker workflow:
 2. Verify local marketplace sources resolve to an existing plugin directory.
 3. Verify plugin and marketplace payloads contain regular content files only.
 4. Verify generated setup/profile config is orthogonal.
-5. Run the public validation commands in `nddev-builder/references/validation-workflows.md`.
+5. Run the public validation commands in `../nddev-builder/references/validation-workflows.md`.
 
 Release validation here is public-module validation only. Root-private harness
 release evidence and registry pin advancement happen later in the private

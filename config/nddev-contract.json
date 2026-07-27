@@ -86,6 +86,10 @@
     "managed_symlinks_rejected": true,
     "managed_hardlinks_rejected": true,
     "sibling_lock_and_backup_state_ignored": true,
+    "persistent_flock_lock_file": true,
+    "lock_parent_non_writable_while_held": true,
+    "lock_held_through_launch_child": true,
+    "concurrent_setup_mutations_denied_while_launching": true,
     "legacy_sibling_backups_read_only_when_strictly_validated": true,
     "bounded_managed_reads": true,
     "max_backups": 10,
@@ -101,7 +105,7 @@
     "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations": true,
     "launch_strips_provider_credentials": true,
     "no_ambient_provider_secrets": true,
-    "same_uid_malicious_mutation_boundary": "same user malicious mutation is outside cross-user isolation boundary"
+    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation, especially under sandbox off, is outside the cross-user isolation boundary"
   },
   "runtime_launch": {
     "command": "grok",

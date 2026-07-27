@@ -36,6 +36,8 @@
   errors without swallowing interrupts.
 - Pass explicit release supply-chain inputs and setup manager runtime roots
   into the shared release workflow.
+- Replace the removable directory lock with a persistent `fcntl.flock` lock file
+  and deny concurrent setup mutations during managed launch.
 
 ### Removed
 

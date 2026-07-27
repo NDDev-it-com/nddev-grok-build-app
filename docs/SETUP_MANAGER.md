@@ -18,6 +18,12 @@ state inside the same rollback-protected transaction.
 
 The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
 validated against `build/manifest.json`; do not duplicate it by hand.
+Manager mutations use a target-internal regular lock file at
+`$GROK_HOME/.nddev-grok-build/lock`, opened with no-follow semantics, mode
+`0600`, and an exclusive `fcntl.flock` descriptor. While the lock is held, the
+control root is mode `0500`, so cooperative child unlink or rmdir attempts
+against the lock path fail. Stale held-mode control roots or old directory
+locks are recovered only after strict real-path, owner, and mode checks.
 
 ## Content Setup
 
@@ -61,11 +67,13 @@ JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch holds the
-target-internal lock through the child process, verifies `bin/grok`, starts a
-private target-internal launch image, immediately rechecks its inode and digest,
-and removes that image after the child exits. Lifecycle, auth, plugin, marketplace, and
-MCP mutating subcommands are denied through managed launch. Direct malicious
-mutation by the same user account is outside the cross-user isolation boundary.
+target-internal flock descriptor through the child process, verifies `bin/grok`,
+starts a private target-internal launch image, immediately rechecks its inode
+and digest, and removes that image after the child exits. Lifecycle, auth,
+plugin, marketplace, and MCP mutating subcommands are denied through managed
+launch. Cooperative same-user manager operations are serialized; direct
+malicious same-user mutation, especially under `full-auto` sandbox `off`, is
+outside the cross-user isolation boundary.
 
 ## Legacy State
 

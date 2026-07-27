@@ -315,6 +315,9 @@ def validate_manager_source() -> None:
     for marker in FORBIDDEN_MANAGER_SOURCE_MARKERS:
         if marker in source:
             raise ValueError(f"manager source exposes forbidden test switch marker: {marker}")
+    for marker in ("O_NOFOLLOW", "fcntl.flock", "LOCK_PARENT_HELD_MODE = 0o500"):
+        if marker not in source:
+            raise ValueError(f"manager source is missing lock invariant marker: {marker}")
 
 
 def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
@@ -466,6 +469,26 @@ def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> N
         raise ValueError(f"unexpected manager JSON error: {payload}")
 
 
+def expect_cli_lock_error(argv: list[str], real_popen: Any) -> None:
+    current_popen = subprocess.Popen
+    try:
+        subprocess.Popen = real_popen
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "cli-tools" / "nddev_grok_build.py"), *argv],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        subprocess.Popen = current_popen
+    if completed.returncode != 2:
+        raise ValueError(f"expected locked CLI rc=2, got {completed.returncode}")
+    payload = json.loads(completed.stdout)
+    if "target is locked" not in str(payload.get("error", "")):
+        raise ValueError(f"unexpected locked CLI error: {payload}")
+
+
 def validate_fetch_error_smokes(manager: Any) -> None:
     original_urlopen = manager.urllib.request.urlopen
 
@@ -583,8 +606,33 @@ def validate_adversarial_smokes(manager: Any) -> None:
 
         class FakePopen:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
-                if not manager.lock_path(target).is_dir():
-                    raise ValueError("launch did not hold managed-state lock through subprocess")
+                control = manager.managed_control_dir(target)
+                lock = manager.lock_path(target)
+                control_mode = stat.S_IMODE(control.lstat().st_mode)
+                if control_mode != manager.LOCK_PARENT_HELD_MODE:
+                    raise ValueError("launch did not make the lock parent non-writable")
+                lock_info = lock.lstat()
+                if not stat.S_ISREG(lock_info.st_mode):
+                    raise ValueError("launch lock must be a regular file")
+                if stat.S_IMODE(lock_info.st_mode) != manager.OWNER_FILE_MODE:
+                    raise ValueError("launch lock file must have mode 0600")
+                try:
+                    lock.unlink()
+                except PermissionError:
+                    pass
+                else:
+                    raise ValueError("launch child could unlink the held lock file")
+                try:
+                    lock.rmdir()
+                except OSError:
+                    pass
+                else:
+                    raise ValueError("launch child could remove the held lock path")
+                expect_cli_lock_error(["remove", "--target", str(target), "--json"], original_popen)
+                expect_cli_lock_error(
+                    ["switch", "--profile", "safe", "--target", str(target), "--json"],
+                    original_popen,
+                )
                 launch_image = Path(command[0])
                 if launch_image.parent.resolve() != manager.control_tmp_dir(target).resolve():
                     raise ValueError("launch did not use a private target-internal launch image")
@@ -598,7 +646,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 self.returncode = 0
 
             def wait(self) -> int:
-                if not manager.lock_path(target).is_dir():
+                if not manager.lock_path(target).is_file():
                     raise ValueError("launch lock was released before child exit")
                 return self.returncode
 
@@ -812,6 +860,18 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest must require existing target mode 0700")
     if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/lock":
         raise ValueError("manifest lock must be target-internal")
+    if transaction.get("lock_type") != "persistent regular file with fcntl.flock":
+        raise ValueError("manifest lock_type mismatch")
+    if transaction.get("lock_file_mode") != "0600":
+        raise ValueError("manifest lock file mode mismatch")
+    if transaction.get("lock_parent_mode_while_held") != "0500":
+        raise ValueError("manifest lock held parent mode mismatch")
+    if transaction.get("lock_parent_mode_when_unlocked") != "0700":
+        raise ValueError("manifest unlocked parent mode mismatch")
+    if transaction.get("lock_held_through_launch_child") is not True:
+        raise ValueError("manifest must require launch to hold the lock through child exit")
+    if transaction.get("lock_crash_recovery") is not True:
+        raise ValueError("manifest must declare lock crash recovery")
     if transaction.get("launch_requires_current_software") is not True:
         raise ValueError("manifest must require current software for launch")
     for key in (
@@ -827,6 +887,10 @@ def main(argv: list[str] | None = None) -> int:
         transaction.get("same_uid_malicious_mutation_boundary", "")
     ).replace("-", " "):
         raise ValueError("manifest must document the same-user mutation boundary")
+    if "sandbox off" not in str(
+        transaction.get("same_uid_malicious_mutation_boundary", "")
+    ).replace("-", " "):
+        raise ValueError("manifest must document the sandbox-off same-user boundary")
     managed_state = contract.get("managed_state")
     if not isinstance(managed_state, dict):
         raise ValueError("contract managed_state missing")
@@ -840,6 +904,10 @@ def main(argv: list[str] | None = None) -> int:
     for key in (
         "existing_target_private_mode_required",
         "sibling_lock_and_backup_state_ignored",
+        "persistent_flock_lock_file",
+        "lock_parent_non_writable_while_held",
+        "lock_held_through_launch_child",
+        "concurrent_setup_mutations_denied_while_launching",
         "legacy_sibling_backups_read_only_when_strictly_validated",
         "restore_validates_backup_envelope_before_mutation",
         "restore_validates_stamp_path_set_and_digests",
@@ -856,6 +924,10 @@ def main(argv: list[str] | None = None) -> int:
         safety.get("same_uid_malicious_mutation_boundary", "")
     ).replace("-", " "):
         raise ValueError("contract must document the same-user mutation boundary")
+    if "sandbox off" not in str(
+        safety.get("same_uid_malicious_mutation_boundary", "")
+    ).replace("-", " "):
+        raise ValueError("contract must document the sandbox-off same-user boundary")
     if build.get("grok_build_tested") != baseline["release"]["npm_version"]:
         raise ValueError("tested Grok Build version differs from baseline release")
     if build.get("grok_build_tested") != GROK_VERSION:

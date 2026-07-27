@@ -209,12 +209,18 @@
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
     "lock": "$GROK_HOME/.nddev-grok-build/lock",
+    "lock_type": "persistent regular file with fcntl.flock",
+    "lock_file_mode": "0600",
+    "lock_parent_mode_while_held": "0500",
+    "lock_parent_mode_when_unlocked": "0700",
+    "lock_held_through_launch_child": true,
+    "lock_crash_recovery": true,
     "restore_prevalidates_backup_before_mutation": true,
     "restore_post_validates_clean_state": true,
     "restore_rollback_byte_identical_on_failure": true,
     "launch_requires_current_software": true,
     "launch_uses_verified_private_image": true,
-    "same_uid_malicious_mutation_boundary": "same user malicious mutation is outside cross-user isolation boundary"
+    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation, especially under sandbox off, is outside the cross-user isolation boundary"
   },
   "runtime_compatibility": {
     "baseline_ref": "references/grok-build-baseline.json",

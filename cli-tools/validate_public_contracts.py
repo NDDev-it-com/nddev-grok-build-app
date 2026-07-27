@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +32,32 @@ REQUIRED_WORKFLOWS = {
     "scorecard.yml": ".github/workflows/public-scorecard-json.yml",
     "secret-scan.yml": ".github/workflows/secret-scan.yml",
     "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
+}
+RELEASE_PERMISSIONS = {
+    "contents": "write",
+    "id-token": "write",
+    "attestations": "write",
+    "artifact-metadata": "write",
+}
+RELEASE_GOVERNANCE_PATHS = {
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "CHANGELOG.md",
+    "AGENTS.md",
+    ".gds",
+    ".github",
+}
+RELEASE_ARCHIVE_REQUIRED_PATHS = {
+    *RELEASE_GOVERNANCE_PATHS,
+    "build",
+    "builder",
+    "cli-tools",
+    "config",
+    "docs",
+    "profiles",
+    "references",
+    "setups",
 }
 SETUP_ORDER = ["nddev-builder"]
 PROFILE_ORDER = ["full-auto", "safe"]
@@ -108,6 +135,126 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return value
+
+
+def leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def parse_workflow_mapping(lines: list[str], header: str, indent: int) -> dict[str, str]:
+    start = None
+    for index, line in enumerate(lines):
+        if leading_spaces(line) == indent and line.strip() == f"{header}:":
+            start = index + 1
+            break
+    if start is None:
+        raise ValueError(f"release workflow missing {header} mapping")
+    values: dict[str, str] = {}
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        current_indent = leading_spaces(line)
+        if not stripped:
+            index += 1
+            continue
+        if current_indent <= indent:
+            break
+        if current_indent == indent + 2 and ":" in stripped:
+            key, raw = stripped.split(":", 1)
+            raw = raw.strip()
+            if raw == ">-":
+                chunks: list[str] = []
+                index += 1
+                while index < len(lines):
+                    folded = lines[index]
+                    folded_stripped = folded.strip()
+                    if not folded_stripped:
+                        index += 1
+                        continue
+                    if leading_spaces(folded) <= current_indent:
+                        break
+                    chunks.append(folded_stripped)
+                    index += 1
+                values[key] = " ".join(chunks)
+                continue
+            values[key] = raw
+        index += 1
+    return values
+
+
+def split_workflow_paths(raw: str) -> set[str]:
+    paths = {item for item in raw.split() if item}
+    if not paths:
+        raise ValueError("release workflow path input must not be empty")
+    return paths
+
+
+def require_release_paths_exist(paths: set[str], label: str) -> None:
+    tracked = tracked_release_paths()
+    for relative in sorted(paths):
+        if relative.startswith("/") or ".." in Path(relative).parts:
+            raise ValueError(f"release {label} contains unsafe path {relative}")
+        if relative == ".git" or relative.startswith(".git/"):
+            raise ValueError(f"release {label} must not include git internals")
+        if not (ROOT / relative).exists():
+            raise ValueError(f"release {label} path does not exist: {relative}")
+        if tracked is not None and not release_path_is_tracked(relative, tracked):
+            raise ValueError(f"release {label} path has no tracked content: {relative}")
+
+
+def tracked_release_paths() -> set[str] | None:
+    if not (ROOT / ".git").exists():
+        return None
+    completed = subprocess.run(
+        ["git", "ls-files"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError(f"cannot inspect tracked release paths: {completed.stderr.strip()}")
+    return {line for line in completed.stdout.splitlines() if line}
+
+
+def release_path_is_tracked(relative: str, tracked: set[str]) -> bool:
+    return relative in tracked or any(path.startswith(f"{relative}/") for path in tracked)
+
+
+def contract_runtime_required_paths(manifest: dict[str, Any], contract: dict[str, Any]) -> set[str]:
+    required = {"README.md", "LICENSE", "VERSION", "build", "cli-tools", "config"}
+    for key in ("source_root", "profile_root"):
+        value = manifest.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"manifest {key} must be a path string")
+        required.add(value)
+    builder = manifest.get("nddev_builder")
+    if not isinstance(builder, dict) or not isinstance(builder.get("source"), str):
+        raise ValueError("manifest nddev_builder.source missing")
+    required.add(Path(builder["source"]).parts[0])
+    compatibility = manifest.get("runtime_compatibility")
+    if not isinstance(compatibility, dict):
+        raise ValueError("manifest runtime_compatibility missing")
+    for key in ("baseline_ref", "version_ref"):
+        value = compatibility.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"manifest runtime_compatibility.{key} missing")
+        required.add(Path(value).parts[0])
+    for key in ("source_root", "profile_root"):
+        value = contract.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"contract {key} must be a path string")
+        required.add(value)
+    marketplace = contract.get("plugin_marketplace")
+    if not isinstance(marketplace, dict):
+        raise ValueError("contract plugin_marketplace missing")
+    for key in ("plugin_manifest", "marketplace_manifest", "marketplace_index"):
+        value = marketplace.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"contract plugin_marketplace.{key} missing")
+        required.add(Path(value).parts[0])
+    return required
 
 
 def setup_ids() -> list[str]:
@@ -582,6 +729,42 @@ def validate_workflows() -> None:
             raise ValueError(f"{filename}: missing exact shared CI caller")
 
 
+def validate_release_workflow(manifest: dict[str, Any], contract: dict[str, Any]) -> None:
+    path = ROOT / ".github" / "workflows" / "release.yml"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    expected_uses = (
+        "uses: "
+        f"NDDev-it-com/ci-workflows/.github/workflows/release-supply-chain.yml@{SHARED_CI_COMMIT} "
+        f"# {SHARED_CI_VERSION}"
+    )
+    if text.count(expected_uses) != 1:
+        raise ValueError("release workflow must call the exact shared release-supply-chain pin")
+    if '      - "[0-9]+.[0-9]+.[0-9]+"' not in text:
+        raise ValueError("release workflow must publish stable numeric tags")
+    permissions = parse_workflow_mapping(lines, "permissions", indent=4)
+    if permissions != RELEASE_PERMISSIONS:
+        raise ValueError("release workflow job permissions mismatch")
+    inputs = parse_workflow_mapping(lines, "with", indent=4)
+    if inputs.get("version") != "${{ github.ref_name }}":
+        raise ValueError("release workflow version input must use github.ref_name")
+    if inputs.get("package_name") != "nddev-grok-build-app":
+        raise ValueError("release workflow package_name mismatch")
+    archive_paths = split_workflow_paths(inputs.get("archive_paths", ""))
+    runtime_paths = split_workflow_paths(inputs.get("runtime_paths", ""))
+    require_release_paths_exist(archive_paths, "archive_paths")
+    require_release_paths_exist(runtime_paths, "runtime_paths")
+    missing_archive = RELEASE_ARCHIVE_REQUIRED_PATHS - archive_paths
+    if missing_archive:
+        raise ValueError(f"release archive_paths missing required paths: {sorted(missing_archive)}")
+    if not runtime_paths <= archive_paths:
+        raise ValueError("release runtime_paths must be a subset of archive_paths")
+    required_runtime = contract_runtime_required_paths(manifest, contract)
+    missing_runtime = required_runtime - runtime_paths
+    if missing_runtime:
+        raise ValueError(f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parse_args(argv)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -764,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_adversarial_smokes(manager)
     validate_fetch_error_smokes(manager)
     validate_workflows()
+    validate_release_workflow(manifest, contract)
     print("validate_public_contracts.py: PASS")
     return 0
 

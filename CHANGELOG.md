@@ -34,6 +34,8 @@
   and digests before restore writes, with post-restore clean-state rollback.
 - Normalize ordinary pinned installer fetch failures into stable manager JSON
   errors without swallowing interrupts.
+- Pass explicit release supply-chain inputs and setup manager runtime roots
+  into the shared release workflow.
 
 ### Removed
 

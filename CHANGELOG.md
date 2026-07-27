@@ -21,6 +21,16 @@
 - Added target-owned stable-channel installer provenance and non-live software
   status checks.
 
+### Fixed
+
+- Hardened managed target trust boundaries: existing targets must be
+  current-user-owned `0700` directories, locks and backups are target-internal,
+  and launchability now requires current target-owned software.
+- Removed public installer test switches; production install and update commands
+  use only the pinned official installer.
+- Held the managed target lock through launch, denied Grok Build state-mutating
+  subcommands, and added immediate launch image inode and digest rechecks.
+
 ### Removed
 
 - Removed the public balanced profile and the old repository-boundary-only

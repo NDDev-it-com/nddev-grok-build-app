@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
@@ -76,6 +82,16 @@ BUILDER_SKILLS = {
     "grok-install-lifecycle",
     "grok-creator-checker-release",
 }
+FORBIDDEN_MANAGER_SOURCE_MARKERS = {
+    "NDDEV_GROK_BUILD_TEST",
+    "ALLOW_TEST",
+    "FAIL_AFTER",
+    "TEST_INSTALLER",
+    "TEST_PROBE",
+    "TEST_TIMEOUT",
+    "installer_source_url",
+    "internal_timeout_seconds",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -141,6 +157,179 @@ def load_manager_module() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def validate_manager_source() -> None:
+    source = (ROOT / "cli-tools" / "nddev_grok_build.py").read_text(encoding="utf-8")
+    for marker in FORBIDDEN_MANAGER_SOURCE_MARKERS:
+        if marker in source:
+            raise ValueError(f"manager source exposes forbidden test switch marker: {marker}")
+
+
+def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
+    try:
+        callback()
+    except manager.GrokBuildSetupError as exc:
+        if expected not in str(exc):
+            raise ValueError(f"unexpected manager error: {exc}") from exc
+        return
+    raise ValueError(f"expected manager error containing {expected!r}")
+
+
+def install_stub_software(manager: Any, target: Path, body: bytes) -> str:
+    for directory in (
+        manager.software_container(target),
+        manager.software_root(target),
+        manager.software_versions_dir(target),
+        manager.software_version_dir(target),
+        manager.managed_grok_path(target).parent,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(manager.OWNER_DIRECTORY_MODE)
+    digest = hashlib.sha256(body).hexdigest()
+    for binary in (manager.managed_grok_path(target), manager.software_tree_binary(target)):
+        binary.write_bytes(body)
+        binary.chmod(manager.OWNER_EXEC_MODE)
+    stamp = manager.software_stamp(
+        target,
+        installer_source=manager.INSTALLER_URL,
+        installer_sha256=manager.INSTALLER_SHA256,
+        binary_sha256=digest,
+        version_output=f"grok {manager.GROK_VERSION}",
+    )
+    manager.software_stamp_path(target).write_text(
+        json.dumps(stamp, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    manager.software_stamp_path(target).chmod(manager.OWNER_FILE_MODE)
+    return digest
+
+
+def validate_adversarial_smokes(manager: Any) -> None:
+    setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
+    profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-public-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        bad_target = tmp / "bad-mode"
+        bad_target.mkdir(mode=0o700)
+        bad_target.chmod(0o777)
+        try:
+            expect_manager_error(
+                manager,
+                lambda: manager.status_payload(bad_target),
+                "target must have mode 0700",
+            )
+        finally:
+            bad_target.chmod(0o700)
+
+        target = tmp / "grok-home"
+        target.mkdir(mode=0o700)
+        sibling_lock = tmp / ".grok-home.nddev-grok-build.lock"
+        sibling_backups = tmp / ".grok-home.nddev-grok-build-backups"
+        sibling_lock.mkdir(mode=0o700)
+        sibling_backups.mkdir(mode=0o700)
+        (sibling_backups / "marker").write_text("must not be read\n", encoding="utf-8")
+        manager.write_setup(target, setup, profile)
+        if not sibling_lock.is_dir() or not sibling_backups.is_dir():
+            raise ValueError("manager touched precreated sibling lock/backup state")
+        status = manager.status_payload(target)
+        if status["launchable"] or status.get("software_current") is not False:
+            raise ValueError("status launchable must be false without current software")
+
+        denied = (
+            ["update"],
+            ["setup"],
+            ["login"],
+            ["plugin", "install", "nddev-builder"],
+            ["plugin", "marketplace", "add", "local"],
+            ["mcp", "add", "server"],
+        )
+        for child_args in denied:
+            expect_manager_error(
+                manager,
+                lambda args=child_args: manager.launch(target, list(args)),
+                "managed-state mutation",
+            )
+
+        original = (
+            b"#!/bin/sh\n"
+            b"printf 'original\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
+        )
+        replacement = (
+            b"#!/bin/sh\n"
+            b"printf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
+        )
+        original_digest = install_stub_software(manager, target, original)
+        original_popen = manager.subprocess.Popen
+
+        class FakePopen:
+            def __init__(self, command: list[str], **kwargs: Any) -> None:
+                if not manager.lock_path(target).is_dir():
+                    raise ValueError("launch did not hold managed-state lock through subprocess")
+                launch_image = Path(command[0])
+                if launch_image.parent.resolve() != manager.control_tmp_dir(target).resolve():
+                    raise ValueError("launch did not use a private target-internal launch image")
+                if kwargs.get("close_fds") is not True:
+                    raise ValueError("launch must close ambient file descriptors")
+                launched = launch_image.read_bytes()
+                if hashlib.sha256(launched).hexdigest() != original_digest:
+                    raise ValueError("launch image does not match the verified software stamp")
+                manager.managed_grok_path(target).write_bytes(replacement)
+                manager.managed_grok_path(target).chmod(manager.OWNER_EXEC_MODE)
+                self.returncode = 0
+
+            def wait(self) -> int:
+                if not manager.lock_path(target).is_dir():
+                    raise ValueError("launch lock was released before child exit")
+                return self.returncode
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        try:
+            manager.subprocess.Popen = FakePopen
+            if manager.launch(target, ["doctor"]) != 0:
+                raise ValueError("stubbed launch did not return success")
+        finally:
+            manager.subprocess.Popen = original_popen
+
+        install_stub_software(manager, target, original)
+
+        class MutatingPopen:
+            def __init__(self, command: list[str], **kwargs: Any) -> None:
+                launch_image = Path(command[0])
+                launch_image.write_bytes(replacement)
+                launch_image.chmod(manager.OWNER_EXEC_MODE)
+                self.returncode = 0
+                self.killed = False
+
+            def wait(self) -> int:
+                return self.returncode
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+        try:
+            manager.subprocess.Popen = MutatingPopen
+            expect_manager_error(
+                manager,
+                lambda: manager.launch(target, ["doctor"]),
+                "launch image digest changed",
+            )
+        finally:
+            manager.subprocess.Popen = original_popen
+
+    sticky_parent = Path("/tmp")
+    if sticky_parent.exists() and sticky_parent.stat().st_mode & stat.S_ISVTX:
+        sticky_target = Path(tempfile.mkdtemp(prefix="nddev-grok-build-", dir=str(sticky_parent)))
+        try:
+            sticky_target.chmod(0o700)
+            manager.write_setup(sticky_target, setup, profile)
+            sticky_status = manager.status_payload(sticky_target)
+            if not sticky_status["managed"]:
+                raise ValueError("0700 target under sticky temp parent was not accepted")
+        finally:
+            shutil.rmtree(sticky_target, ignore_errors=True)
 
 
 def validate_builder_toolkit(build_version: str) -> None:
@@ -248,6 +437,50 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("profile ids are not synchronized")
     if manifest.get("default_setup") != "nddev-builder" or manifest.get("default_profile") != "full-auto":
         raise ValueError("manifest default setup/profile mismatch")
+    backup_policy = manifest.get("backup_policy")
+    if not isinstance(backup_policy, dict):
+        raise ValueError("manifest backup_policy missing")
+    if backup_policy.get("location") != "$GROK_HOME/.nddev-grok-build/backups":
+        raise ValueError("manifest backup policy must be target-internal")
+    transaction = manifest.get("transaction_policy")
+    if not isinstance(transaction, dict):
+        raise ValueError("manifest transaction_policy missing")
+    if transaction.get("existing_target_mode_required") != "0700":
+        raise ValueError("manifest must require existing target mode 0700")
+    if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/lock":
+        raise ValueError("manifest lock must be target-internal")
+    if transaction.get("launch_requires_current_software") is not True:
+        raise ValueError("manifest must require current software for launch")
+    if transaction.get("launch_uses_verified_private_image") is not True:
+        raise ValueError("manifest must require verified private launch image")
+    if "same user" not in str(
+        transaction.get("same_uid_malicious_mutation_boundary", "")
+    ).replace("-", " "):
+        raise ValueError("manifest must document the same-user mutation boundary")
+    managed_state = contract.get("managed_state")
+    if not isinstance(managed_state, dict):
+        raise ValueError("contract managed_state missing")
+    if managed_state.get("control_dir") != ".nddev-grok-build":
+        raise ValueError("contract control_dir mismatch")
+    if managed_state.get("existing_target_mode_required") != "0700":
+        raise ValueError("contract must require existing target mode 0700")
+    safety = contract.get("safety")
+    if not isinstance(safety, dict):
+        raise ValueError("contract safety missing")
+    for key in (
+        "existing_target_private_mode_required",
+        "sibling_lock_and_backup_state_ignored",
+        "legacy_sibling_backups_read_only_when_strictly_validated",
+        "launch_requires_current_target_owned_software",
+        "launch_uses_verified_private_image",
+        "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations",
+    ):
+        if safety.get(key) is not True:
+            raise ValueError(f"contract safety must set {key}=true")
+    if "same user" not in str(
+        safety.get("same_uid_malicious_mutation_boundary", "")
+    ).replace("-", " "):
+        raise ValueError("contract must document the same-user mutation boundary")
     if build.get("grok_build_tested") != baseline["release"]["npm_version"]:
         raise ValueError("tested Grok Build version differs from baseline release")
     if build.get("grok_build_tested") != GROK_VERSION:
@@ -317,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest installer SHA-256 mismatch")
     if manifest_lifecycle.get("version") != GROK_VERSION:
         raise ValueError("manifest software version mismatch")
+    validate_manager_source()
     manager = load_manager_module()
     expected_managed = sorted([*manager.content_managed_paths(), manager.STAMP_NAME])
     if sorted(manifest.get("managed_files", [])) != expected_managed:
@@ -333,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (ROOT / relative).is_file():
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
+    validate_adversarial_smokes(manager)
     validate_workflows()
     print("validate_public_contracts.py: PASS")
     return 0

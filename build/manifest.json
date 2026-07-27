@@ -186,7 +186,8 @@
     "binary_delivery": false
   },
   "backup_policy": {
-    "location": "sibling .<target-name>.nddev-grok-build-backups",
+    "location": "$GROK_HOME/.nddev-grok-build/backups",
+    "legacy_sibling_restore": "read only after strict owner, mode, and canonical-target validation",
     "envelope": "NDDEV-GROK-BUILD-BACKUP.json",
     "slots": 10,
     "canonical_target_bound": true
@@ -197,13 +198,16 @@
     "managed_file_mode": "0600",
     "managed_directory_mode": "0700",
     "new_target_mode": "0700",
-    "preserve_existing_target_mode": true,
+    "existing_target_mode_required": "0700",
     "preserve_unmanaged_files": true,
     "reject_symlink_targets": true,
     "reject_symlink_managed_files": true,
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
-    "lock": "exclusive sibling directory"
+    "lock": "$GROK_HOME/.nddev-grok-build/lock",
+    "launch_requires_current_software": true,
+    "launch_uses_verified_private_image": true,
+    "same_uid_malicious_mutation_boundary": "same user malicious mutation is outside cross-user isolation boundary"
   },
   "runtime_compatibility": {
     "baseline_ref": "references/grok-build-baseline.json",

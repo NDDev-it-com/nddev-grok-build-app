@@ -34,6 +34,7 @@ DEFAULT_PROFILE_ID = "full-auto"
 STAMP_NAME = "NDDEV-GROK-BUILD-SETUP.json"
 BACKUP_NAME = "NDDEV-GROK-BUILD-BACKUP.json"
 SOFTWARE_STAMP_NAME = "NDDEV-GROK-BUILD-SOFTWARE.json"
+CONTROL_DIR_NAME = ".nddev-grok-build"
 STAMP_SCHEMA_VERSION = 2
 LEGACY_STAMP_SCHEMA_VERSION = 1
 SOFTWARE_STAMP_SCHEMA_VERSION = 2
@@ -56,11 +57,8 @@ GROK_NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
-INTERNAL_INSTALLER_URL_ENV = "NDDEV_GROK_BUILD_TEST_INSTALLER_URL"
-INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV = "NDDEV_GROK_BUILD_TEST_FAIL_AFTER_VERSION_SWAP"
-INTERNAL_FAIL_AFTER_BINARY_SWAP_ENV = "NDDEV_GROK_BUILD_TEST_FAIL_AFTER_BINARY_SWAP"
-INTERNAL_INSTALLER_TIMEOUT_ENV = "NDDEV_GROK_BUILD_TEST_INSTALLER_TIMEOUT_SECONDS"
-INTERNAL_PROBE_TIMEOUT_ENV = "NDDEV_GROK_BUILD_TEST_PROBE_TIMEOUT_SECONDS"
+INSTALLER_TIMEOUT_SECONDS = 120.0
+VERSION_PROBE_TIMEOUT_SECONDS = 15.0
 SAFE_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 PROVIDER_SECRET_NAMES = {
     "ANTHROPIC_API_KEY",
@@ -113,6 +111,25 @@ TARGET_SCOPE_FLAGS_NO_VALUE = {
     "--trust",
     "--yolo",
     "-c",
+}
+MUTATING_LAUNCH_TOP_LEVEL_COMMANDS = {
+    "auth",
+    "config",
+    "import",
+    "login",
+    "logout",
+    "setup",
+    "update",
+}
+MUTATING_LAUNCH_SUBCOMMANDS = {
+    "mcp": {"add", "remove"},
+    "memory": {"clear"},
+    "plugin": {"disable", "enable", "install", "uninstall", "update"},
+    "sessions": {"delete"},
+    "worktree": {"gc", "rm"},
+}
+MUTATING_LAUNCH_NESTED_SUBCOMMANDS = {
+    ("plugin", "marketplace"): {"add", "remove", "update"},
 }
 BASE_MANAGED_PATHS = ("config.toml", "AGENTS.md")
 MERGED_MARKER_PATHS = {"config.toml", "AGENTS.md"}
@@ -184,26 +201,52 @@ def require_real_directory(path: Path, label: str) -> os.stat_result:
     return info
 
 
+def require_real_parent_directory(path: Path, label: str) -> os.stat_result:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    return info
+
+
+def effective_uid() -> int | None:
+    get_effective_uid = getattr(os, "geteuid", None)
+    if not callable(get_effective_uid):
+        return None
+    return int(get_effective_uid())
+
+
+def require_safe_target_parent(path: Path, label: str) -> os.stat_result:
+    info = require_real_parent_directory(path, label)
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        uid = effective_uid()
+        trusted_owner = uid is None or info.st_uid in {0, uid}
+        if not (info.st_mode & stat.S_ISVTX and trusted_owner):
+            fail(f"{label} must not be group/world writable unless it is a sticky temp directory")
+    return info
+
+
 def validate_target(target: Path, *, create: bool = False) -> Path:
     parent = target.parent
     if create:
         create_missing_directories(missing_directory_chain(parent))
-        require_real_directory(parent, "target parent")
+        require_safe_target_parent(parent, "target parent")
     else:
-        parent_info = stat_existing(parent, "target parent")
-        if parent_info is None:
+        if not parent.exists():
             return target.resolve(strict=False)
-        if not stat.S_ISDIR(parent_info.st_mode):
-            fail("target parent must be a directory")
+        require_safe_target_parent(parent, "target parent")
     info = stat_existing(target, "target")
     if info is None:
         if not create:
             return target.resolve(strict=False)
         target.mkdir(mode=OWNER_DIRECTORY_MODE)
         target.chmod(OWNER_DIRECTORY_MODE)
+        require_private_directory(target, "target")
         return target.resolve()
-    if not stat.S_ISDIR(info.st_mode):
-        fail("target must be a real directory")
+    require_private_directory(target, "target")
     return target.resolve()
 
 
@@ -232,30 +275,76 @@ def remove_created_empty_directories(chain: list[Path]) -> None:
             path.rmdir()
 
 
+def managed_control_dir(target: Path) -> Path:
+    return target / CONTROL_DIR_NAME
+
+
 def backup_pool(target: Path) -> Path:
+    return managed_control_dir(target) / "backups"
+
+
+def legacy_backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-grok-build-backups"
 
 
+def control_tmp_dir(target: Path) -> Path:
+    return managed_control_dir(target) / "tmp"
+
+
 def lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-grok-build.lock"
+    return managed_control_dir(target) / "lock"
+
+
+def backup_envelope_path(target: Path, slot: int) -> Path:
+    internal = backup_pool(target) / str(slot) / BACKUP_NAME
+    if internal.exists() or internal.is_symlink():
+        require_private_directory(backup_pool(target), "backup pool")
+        require_private_directory(internal.parent, "backup slot")
+        require_existing_managed_file(
+            internal, BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
+        )
+        return internal
+    legacy = legacy_backup_pool(target) / str(slot) / BACKUP_NAME
+    if legacy.exists() or legacy.is_symlink():
+        require_private_directory(legacy_backup_pool(target), "legacy backup pool")
+        require_private_directory(legacy.parent, "legacy backup slot")
+        require_existing_managed_file(
+            legacy, BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
+        )
+        return legacy
+    return internal
 
 
 @contextlib.contextmanager
-def target_lock(target: Path):
+def target_lock(target: Path, *, create: bool):
     created_parent_chain = missing_directory_chain(target.parent)
-    create_missing_directories(created_parent_chain)
-    require_real_directory(target.parent, "target parent")
-    path = lock_path(target)
+    locked = False
+    path: Path | None = None
     try:
+        target = validate_target(target, create=create)
+        if not create and not target.exists() and not target.is_symlink():
+            fail("target is missing")
+        ensure_private_directory(managed_control_dir(target), "NDDev control root")
+        path = lock_path(target)
         path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        locked = True
     except FileExistsError:
         fail(f"target is locked: {path}")
     try:
-        yield
+        yield target
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            path.rmdir()
+        if locked and path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                path.rmdir()
+        prune_empty_control_dirs(target)
         remove_created_empty_directories(created_parent_chain)
+
+
+def prune_empty_control_dirs(target: Path) -> None:
+    for directory in (control_tmp_dir(target), backup_pool(target), managed_control_dir(target)):
+        with contextlib.suppress(FileNotFoundError, OSError):
+            directory.rmdir()
 
 
 def safe_target_path(target: Path, relative: str) -> Path:
@@ -273,28 +362,40 @@ def ensure_real_parent(path: Path, target: Path) -> None:
         info = stat_existing(current, f"managed directory {current}")
         if info is None:
             current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
+            require_private_directory(current, f"managed directory {current}")
             continue
         if not stat.S_ISDIR(info.st_mode):
             fail(f"managed parent is not a directory: {current}")
+        require_current_user_owner(info, f"managed directory {current}")
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail(f"managed directory must have mode 0700: {current}")
 
 
 def require_existing_managed_file(
-    path: Path, label: str, *, max_bytes: int
+    path: Path, label: str, *, max_bytes: int, expected_mode: int | None = None
 ) -> os.stat_result | None:
     info = stat_existing(path, label)
     if info is None:
         return None
     if not stat.S_ISREG(info.st_mode):
         fail(f"{label} must be a regular file")
+    require_current_user_owner(info, label)
     if info.st_nlink != 1:
         fail(f"{label} must not be a hardlink")
+    if expected_mode is not None and stat.S_IMODE(info.st_mode) != expected_mode:
+        fail(f"{label} must have mode {expected_mode:04o}")
     if info.st_size > max_bytes:
         fail(f"{label} is too large")
     return info
 
 
-def read_existing_file(path: Path, *, max_bytes: int, label: str) -> bytes | None:
-    info = require_existing_managed_file(path, label, max_bytes=max_bytes)
+def read_existing_file(
+    path: Path, *, max_bytes: int, label: str, expected_mode: int | None = None
+) -> bytes | None:
+    info = require_existing_managed_file(
+        path, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
     if info is None:
         return None
     with path.open("rb") as handle:
@@ -321,8 +422,12 @@ def atomic_write(path: Path, data: bytes, target: Path) -> None:
         raise
 
 
-def read_json_file(path: Path, *, max_bytes: int, label: str) -> dict[str, Any]:
-    data = read_existing_file(path, max_bytes=max_bytes, label=label)
+def read_json_file(
+    path: Path, *, max_bytes: int, label: str, expected_mode: int | None = None
+) -> dict[str, Any]:
+    data = read_existing_file(
+        path, max_bytes=max_bytes, label=label, expected_mode=expected_mode
+    )
     if data is None:
         fail(f"{label} is missing")
     try:
@@ -585,7 +690,10 @@ def managed_digest_for_bytes(relative: str, data: bytes) -> str:
 
 def current_managed_digest(target: Path, relative: str) -> str | None:
     data = read_existing_file(
-        safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+        safe_target_path(target, relative),
+        max_bytes=MANAGED_MAX_BYTES,
+        label=relative,
+        expected_mode=OWNER_FILE_MODE,
     )
     if data is None:
         return None
@@ -601,7 +709,9 @@ def read_stamp(target: Path) -> dict[str, Any] | None:
     path = stamp_path(target)
     if not path.exists():
         return None
-    stamp = read_json_file(path, max_bytes=METADATA_MAX_BYTES, label=STAMP_NAME)
+    stamp = read_json_file(
+        path, max_bytes=METADATA_MAX_BYTES, label=STAMP_NAME, expected_mode=OWNER_FILE_MODE
+    )
     if stamp.get("product_name") != PRODUCT_NAME:
         fail("stamp belongs to another product")
     canonical = str(validate_target(target, create=False))
@@ -660,6 +770,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "drift": [],
         }
     if is_legacy_stamp(stamp):
+        drift = drift_for_stamp(target, stamp)
         return {
             "state": "legacy-managed",
             "managed": True,
@@ -670,11 +781,13 @@ def status_payload(target: Path) -> dict[str, Any]:
             "legacy": True,
             "launchable": False,
             "build_version": stamp["build_version"],
-            "drift": drift_for_stamp(target, stamp),
+            "drift": drift,
             "managed_files": sorted(stamp["managed_files"]),
             "migration_required": True,
             "allowed_legacy_commands": ["status", "migrate", "restore", "remove"],
         }
+    drift = drift_for_stamp(target, stamp)
+    software = software_status(target)
     return {
         "state": "managed",
         "managed": True,
@@ -683,10 +796,13 @@ def status_payload(target: Path) -> dict[str, Any]:
         "profile_id": stamp["profile_id"],
         "schema_version": stamp["schema_version"],
         "legacy": False,
-        "launchable": True,
+        "launchable": not drift and software["current"],
         "build_version": stamp["build_version"],
-        "drift": drift_for_stamp(target, stamp),
+        "drift": drift,
         "managed_files": sorted(stamp["managed_files"]),
+        "software_current": software["current"],
+        "software_present": software["present"],
+        "software_drift": software["drift"],
     }
 
 
@@ -717,6 +833,7 @@ def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
 
 def choose_backup_slot(pool: Path) -> int:
     create_missing_directories(missing_directory_chain(pool.parent))
+    ensure_private_directory(pool.parent, "NDDev control root")
     ensure_private_directory(pool, "backup pool")
     for slot in range(10):
         if not (pool / str(slot)).exists():
@@ -729,8 +846,11 @@ def create_backup(target: Path, stamp: dict[str, Any]) -> int:
     slot = choose_backup_slot(pool)
     slot_dir = pool / str(slot)
     if slot_dir.exists():
+        require_private_directory(slot_dir, "backup slot")
         shutil.rmtree(slot_dir)
     slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
+    slot_dir.chmod(OWNER_DIRECTORY_MODE)
+    require_private_directory(slot_dir, "backup slot")
     files: dict[str, Any] = {}
     managed_paths = sorted(stamp.get("managed_files", {}))
     for relative in (*managed_paths, STAMP_NAME):
@@ -778,8 +898,7 @@ def write_setup(
     *,
     require_existing: bool = False,
 ) -> dict[str, Any]:
-    with target_lock(target):
-        validate_target(target, create=True)
+    with target_lock(target, create=not require_existing) as target:
         current = read_stamp(target)
         if require_existing and current is None:
             fail("switch requires an already managed target")
@@ -791,11 +910,15 @@ def write_setup(
                 fail(f"managed target has drift: {', '.join(drift)}")
         files = desired_files(target, setup, profile)
         desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
-        changed = [
-            relative
-            for relative, data in files.items()
-            if current_managed_digest(target, relative) != managed_digest_for_bytes(relative, data)
-        ]
+        if current is None:
+            changed = sorted(files)
+        else:
+            changed = [
+                relative
+                for relative, data in files.items()
+                if current_managed_digest(target, relative)
+                != managed_digest_for_bytes(relative, data)
+            ]
         backup_slot = None
         if current is not None and (
             current["setup_id"] != setup["id"] or current["profile_id"] != profile["id"]
@@ -823,8 +946,7 @@ def migrate_setup(
     setup: dict[str, Any],
     requested_profile_id: str | None,
 ) -> dict[str, Any]:
-    with target_lock(target):
-        validate_target(target, create=True)
+    with target_lock(target, create=False) as target:
         current = read_stamp(target)
         if current is None:
             fail("migrate requires a managed legacy target")
@@ -858,10 +980,14 @@ def migrate_setup(
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     if slot < 0 or slot > 9:
         fail("backup slot must be between 0 and 9")
-    with target_lock(target):
-        validate_target(target, create=True)
-        envelope_path = backup_pool(target) / str(slot) / BACKUP_NAME
-        envelope = read_json_file(envelope_path, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME)
+    with target_lock(target, create=False) as target:
+        envelope_path = backup_envelope_path(target, slot)
+        envelope = read_json_file(
+            envelope_path,
+            max_bytes=METADATA_MAX_BYTES,
+            label=BACKUP_NAME,
+            expected_mode=OWNER_FILE_MODE,
+        )
         if envelope.get("product_name") != PRODUCT_NAME:
             fail("backup belongs to another product")
         if envelope.get("canonical_target") != str(validate_target(target, create=False)):
@@ -896,8 +1022,10 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
-    with target_lock(target):
+    if not target.exists() and not target.is_symlink():
         validate_target(target, create=False)
+        return {"removed_setup_id": None, "target": str(validate_target(target, create=False))}
+    with target_lock(target, create=False) as target:
         stamp = read_stamp(target)
         if stamp is None:
             return {"removed_setup_id": None, "target": str(validate_target(target, create=False))}
@@ -1101,6 +1229,65 @@ def read_software_file(path: Path, label: str, *, max_bytes: int = SOFTWARE_MAX_
     return b"".join(chunks)
 
 
+def sha256_file_descriptor(descriptor: int, *, max_bytes: int) -> str:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            fail("Grok Build launch executable is too large")
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[Path, int]:
+    path = managed_grok_path(target)
+    before = require_software_regular_file(path, f"Grok Build managed binary {path}")
+    if stat.S_IMODE(before.st_mode) != OWNER_EXEC_MODE:
+        fail("Grok Build managed binary must have mode 0700")
+    data = read_software_file(path, f"Grok Build managed binary {path}")
+    if sha256_bytes(data) != expected_sha256:
+        fail("Grok Build managed binary digest changed before launch")
+    ensure_private_directory(managed_control_dir(target), "NDDev control root")
+    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
+    temporary_descriptor, temporary_name = tempfile.mkstemp(
+        prefix="launch.", dir=str(control_tmp_dir(target))
+    )
+    temporary = Path(temporary_name)
+    descriptor: int | None = None
+    try:
+        os.write(temporary_descriptor, data)
+        os.fchmod(temporary_descriptor, OWNER_EXEC_MODE)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != OWNER_EXEC_MODE:
+            fail("Grok Build launch image is not a safe executable file")
+        require_current_user_owner(opened, "Grok Build launch image")
+        if sha256_file_descriptor(descriptor, max_bytes=SOFTWARE_MAX_BYTES) != expected_sha256:
+            fail("Grok Build launch image digest does not match the software stamp")
+        return temporary, descriptor
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+
+
 def read_optional_software_file(path: Path, label: str) -> bytes | None:
     if not path.exists() and not path.is_symlink():
         return None
@@ -1142,11 +1329,9 @@ def remove_empty_directory_if_created(path: Path, existed_before: bool) -> None:
         path.rmdir()
 
 
-def read_url_or_file(source: str, *, max_bytes: int) -> bytes:
-    if source.startswith("file://"):
-        return read_software_file(
-            Path(source[7:]), f"Grok Build installer {source}", max_bytes=max_bytes
-        )
+def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
+    if source != INSTALLER_URL:
+        fail("Grok Build installer source must be the pinned official URL")
     request = urllib.request.Request(source, headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"})
     with urllib.request.urlopen(request, timeout=60) as response:
         expected_length = response.headers.get("Content-Length")
@@ -1189,28 +1374,11 @@ def minimal_process_env(
     return env
 
 
-def installer_source_url() -> str:
-    return os.environ.get(INTERNAL_INSTALLER_URL_ENV) or INSTALLER_URL
-
-
-def internal_timeout_seconds(name: str, default: float) -> float:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        timeout = float(value)
-    except ValueError:
-        fail(f"{name} must be a positive timeout in seconds")
-    if timeout <= 0:
-        fail(f"{name} must be a positive timeout in seconds")
-    return timeout
-
-
 def read_pinned_installer() -> tuple[bytes, str, str]:
-    source = installer_source_url()
-    installer = read_url_or_file(source, max_bytes=2 * 1024 * 1024)
+    source = INSTALLER_URL
+    installer = read_official_installer_url(source, max_bytes=2 * 1024 * 1024)
     digest = sha256_bytes(installer)
-    if source == INSTALLER_URL and digest != INSTALLER_SHA256:
+    if digest != INSTALLER_SHA256:
         fail("official Grok Build installer SHA-256 mismatch")
     return installer, digest, source
 
@@ -1487,8 +1655,10 @@ def validate_safe_software_presence(target: Path) -> None:
 def run_vendor_installer(
     installer: bytes, installer_source: str, installer_sha256: str, target: Path
 ) -> dict[str, Any]:
+    ensure_private_directory(managed_control_dir(target), "NDDev control root")
+    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
     with tempfile.TemporaryDirectory(
-        prefix=f".{target.name}.nddev-grok-build-installer.", dir=str(target.parent)
+        prefix="installer.", dir=str(control_tmp_dir(target))
     ) as stage_raw:
         stage = Path(stage_raw)
         home = stage / "home"
@@ -1519,7 +1689,7 @@ def run_vendor_installer(
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=internal_timeout_seconds(INTERNAL_INSTALLER_TIMEOUT_ENV, 120.0),
+                timeout=INSTALLER_TIMEOUT_SECONDS,
             )
         except FileNotFoundError as exc:
             missing = exc.filename or "bash"
@@ -1549,7 +1719,7 @@ def run_vendor_installer(
                 input="",
                 capture_output=True,
                 check=False,
-                timeout=internal_timeout_seconds(INTERNAL_PROBE_TIMEOUT_ENV, 15.0),
+                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
             )
         except FileNotFoundError as exc:
             missing = exc.filename or str(resolved_binary)
@@ -1570,11 +1740,9 @@ def run_vendor_installer(
 
 def install_grok_software(target: Path, command: str) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with target_lock(target):
-        before_target_exists = target.exists() or target.is_symlink()
-        validate_target(target, create=True)
+    before_target_exists = target.exists() or target.is_symlink()
+    with target_lock(target, create=command == "install-cli") as target:
         try:
-            require_private_directory(target, "target")
             status = software_status(target)
             if command == "install-cli" and status["present"]:
                 fail(
@@ -1654,13 +1822,9 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 if before_version_exists:
                     version_dir.rename(rollback)
                 staging.rename(version_dir)
-                if os.environ.get(INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV) == "1":
-                    fail("injected failure after Grok Build version swap")
                 software_atomic_write(
                     managed_grok_path(target), artifact["binary"], target, OWNER_EXEC_MODE
                 )
-                if os.environ.get(INTERNAL_FAIL_AFTER_BINARY_SWAP_ENV) == "1":
-                    fail("injected failure after Grok Build binary swap")
                 software_atomic_write(
                     software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
                 )
@@ -1669,20 +1833,8 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     fail(
                         "Grok Build software install did not produce structurally complete target-owned software"
                     )
-                if installer_source == INSTALLER_URL:
-                    if not final_status["current"]:
-                        fail("Grok Build software install did not produce current pinned software")
-                else:
-                    structural = [
-                        item
-                        for item in final_status["drift"]
-                        if item not in {"installer_url", "installer_sha256"}
-                    ]
-                    if structural:
-                        fail(
-                            "Grok Build test installer produced structural drift: "
-                            + ", ".join(structural)
-                        )
+                if not final_status["current"]:
+                    fail("Grok Build software install did not produce current pinned software")
             except BaseException:
                 if version_dir.exists() or version_dir.is_symlink():
                     if version_dir.is_dir() and not version_dir.is_symlink():
@@ -1796,12 +1948,51 @@ def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:
     return None
 
 
+def launch_command_tokens(child_args: list[str]) -> list[str]:
+    tokens: list[str] = []
+    skip_next = False
+    for arg in child_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--":
+            continue
+        if arg in TARGET_SCOPE_FLAGS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        tokens.append(arg)
+    return tokens
+
+
+def managed_launch_mutation(child_args: list[str]) -> str | None:
+    tokens = launch_command_tokens(child_args)
+    if not tokens:
+        return None
+    first = tokens[0]
+    if first in MUTATING_LAUNCH_TOP_LEVEL_COMMANDS:
+        return first
+    if len(tokens) >= 2 and tokens[1] in MUTATING_LAUNCH_SUBCOMMANDS.get(first, set()):
+        return f"{first} {tokens[1]}"
+    if (
+        len(tokens) >= 3
+        and (first, tokens[1]) in MUTATING_LAUNCH_NESTED_SUBCOMMANDS
+        and tokens[2] in MUTATING_LAUNCH_NESTED_SUBCOMMANDS[(first, tokens[1])]
+    ):
+        return f"{first} {tokens[1]} {tokens[2]}"
+    return None
+
+
 def launch(target: Path, child_args: list[str]) -> int:
     require_supported_runtime_platform()
     override = child_args_use_target_scope_overrides(child_args)
     if override is not None:
         fail(f"launch child arguments must not override target-owned Grok Build scope: {override}")
-    with target_lock(target):
+    mutation = managed_launch_mutation(child_args)
+    if mutation is not None:
+        fail(f"launch denied for Grok Build managed-state mutation: {mutation}")
+    with target_lock(target, create=False) as target:
         status = status_payload(target)
         if not status["managed"]:
             fail("launch requires a managed target")
@@ -1812,6 +2003,9 @@ def launch(target: Path, child_args: list[str]) -> int:
         software = software_status(target)
         if not software["installed"] or not software["current"]:
             fail("launch requires current target-owned Grok Build software")
+        software_stamp_value = load_software_stamp(target)
+        if software_stamp_value is None:
+            fail("launch requires a current target-owned Grok Build software stamp")
         setup = load_setup(str(status["setup_id"]))
         profile = load_profile(str(status["profile_id"]))
         capabilities = setup["managed_capabilities"]
@@ -1824,7 +2018,6 @@ def launch(target: Path, child_args: list[str]) -> int:
         require_private_directory(runtime_root, "Grok Build runtime root")
         require_private_directory(home, "Grok Build runtime HOME")
         require_private_directory(tmp, "Grok Build runtime TMPDIR")
-        executable = managed_grok_path(target)
         child_env: dict[str, str] = {
             "HOME": str(home),
             "GROK_HOME": str(canonical),
@@ -1845,8 +2038,40 @@ def launch(target: Path, child_args: list[str]) -> int:
                 child_env[name] = value
         for name in PROVIDER_SECRET_NAMES:
             child_env.pop(name, None)
-    completed = subprocess.run([str(executable), *child_args], env=child_env, check=False)
-    return int(completed.returncode)
+        launch_image, descriptor = prepare_verified_launch_image(
+            target, str(software_stamp_value["binary_sha256"])
+        )
+        try:
+            expected_image = os.fstat(descriptor)
+            process = subprocess.Popen(
+                [str(launch_image), *child_args],
+                env=child_env,
+                close_fds=True,
+            )
+            current_image = require_software_regular_file(
+                launch_image, "Grok Build launch image", max_bytes=SOFTWARE_MAX_BYTES
+            )
+            if (current_image.st_dev, current_image.st_ino) != (
+                expected_image.st_dev,
+                expected_image.st_ino,
+            ):
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                process.wait()
+                fail("Grok Build launch image changed before child execution")
+            current_digest = sha256_bytes(
+                read_software_file(launch_image, "Grok Build launch image")
+            )
+            if current_digest != software_stamp_value["binary_sha256"]:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                process.wait()
+                fail("Grok Build launch image digest changed before child execution")
+            return int(process.wait())
+        finally:
+            os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                launch_image.unlink()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

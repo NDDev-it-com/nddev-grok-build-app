@@ -7,10 +7,11 @@ is treated as `GROK_HOME` only for manager operations and launch.
 ## Managed State
 
 The manager writes a target-bound setup stamp, records digests for managed
-content, and rotates ten target-bound backups in a sibling
-`.<target-name>.nddev-grok-build-backups` directory. Files outside the managed
-set are preserved. `config.toml` and `AGENTS.md` are co-owned by replacing only
-the NDDev managed marker block.
+content, and rotates ten target-bound backups under
+`$GROK_HOME/.nddev-grok-build/backups`. Existing setup targets must be real,
+current-user-owned directories with mode `0700`; managed files are written with
+mode `0600`. Files outside the managed set are preserved. `config.toml` and
+`AGENTS.md` are co-owned by replacing only the NDDev managed marker block.
 
 The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
 validated against `build/manifest.json`; do not duplicate it by hand.
@@ -52,6 +53,14 @@ The vendor installer runs in a temporary staging area with isolated `HOME`,
 only the staging `grok` binary, then persists a regular target-owned executable
 at `bin/grok` and the version tree. Staged shell rc files, completions,
 installer `config.toml`, and the vendor `agent` alias are discarded.
+
+`status` reports `launchable: true` only when setup content has no drift and
+target-owned Grok Build software is current. Managed launch holds the
+target-internal lock through the child process, verifies `bin/grok`, starts a
+private target-internal launch image, immediately rechecks its inode and digest,
+and removes that image after the child exits. Lifecycle, auth, plugin, marketplace, and
+MCP mutating subcommands are denied through managed launch. Direct malicious
+mutation by the same user account is outside the cross-user isolation boundary.
 
 ## Legacy State
 

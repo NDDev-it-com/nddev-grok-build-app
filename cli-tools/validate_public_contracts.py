@@ -46,9 +46,14 @@ RELEASE_GOVERNANCE_PATHS = {
     "VERSION",
     "CHANGELOG.md",
     "AGENTS.md",
+    ".claude",
     ".gds",
     ".github",
 }
+CLAUDE_BRIDGE_ROOT = ".claude"
+CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
+CLAUDE_BRIDGE_TARGET = "AGENTS.md"
+CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
 RELEASE_ARCHIVE_REQUIRED_PATHS = {
     *RELEASE_GOVERNANCE_PATHS,
     "build",
@@ -226,6 +231,33 @@ def tracked_release_paths() -> set[str] | None:
 
 def release_path_is_tracked(relative: str, tracked: set[str]) -> bool:
     return relative in tracked or any(path.startswith(f"{relative}/") for path in tracked)
+
+
+def validate_claude_bridge(archive_paths: set[str], runtime_paths: set[str]) -> None:
+    bridge_root = ROOT / CLAUDE_BRIDGE_ROOT
+    bridge_path = ROOT / CLAUDE_BRIDGE_PATH
+    try:
+        root_info = bridge_root.lstat()
+    except OSError as exc:
+        raise ValueError(f"Claude bridge root cannot be inspected: {exc}") from exc
+    if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+        raise ValueError("Claude bridge root must be a real directory")
+    entries = sorted(path.name for path in bridge_root.iterdir())
+    if entries != ["CLAUDE.md"]:
+        raise ValueError("Claude bridge root must contain only CLAUDE.md")
+    try:
+        file_info = bridge_path.lstat()
+    except OSError as exc:
+        raise ValueError(f"Claude bridge file cannot be inspected: {exc}") from exc
+    if not stat.S_ISREG(file_info.st_mode) or stat.S_ISLNK(file_info.st_mode):
+        raise ValueError("Claude bridge must be a regular non-symlink file")
+    if bridge_path.read_bytes() != CLAUDE_BRIDGE_BYTES:
+        raise ValueError("Claude bridge bytes must equal @../AGENTS.md newline")
+    for label, paths in (("archive_paths", archive_paths), ("runtime_paths", runtime_paths)):
+        if CLAUDE_BRIDGE_ROOT not in paths:
+            raise ValueError(f"release {label} must include the Claude bridge root")
+        if CLAUDE_BRIDGE_TARGET not in paths:
+            raise ValueError(f"release {label} must include the Claude bridge target")
 
 
 def contract_runtime_required_paths(manifest: dict[str, Any], contract: dict[str, Any]) -> set[str]:
@@ -1202,6 +1234,7 @@ def validate_release_workflow(manifest: dict[str, Any], contract: dict[str, Any]
     missing_runtime = required_runtime - runtime_paths
     if missing_runtime:
         raise ValueError(f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}")
+    validate_claude_bridge(archive_paths, runtime_paths)
 
 
 def validate_skill_local_references(plugin_root: Path, skill_path: Path, text: str) -> None:

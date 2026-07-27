@@ -7,38 +7,24 @@ is treated as `GROK_HOME` only for manager operations and launch.
 ## Managed State
 
 The manager writes a target-bound setup stamp, records digests for managed
-content, and rotates ten target-bound backups under
-`$GROK_HOME/.nddev-grok-build/backups`. Existing setup targets must be real,
-current-user-owned directories with mode `0700`; managed files are written with
-mode `0600`. Files outside the managed set are preserved. `config.toml` and
-`AGENTS.md` are co-owned by replacing only the NDDev managed marker block.
-Restore validates the complete backup envelope, strict base64 payloads, stamp
-path set, and file digests before writing. It then validates the restored clean
-state inside the same rollback-protected transaction.
+content, and keeps target-bound rollback/restore state. Existing setup targets
+must satisfy the current managed-target trust invariant before mutation. Files
+outside the managed set are preserved. `config.toml` and `AGENTS.md` are
+co-owned by replacing only the NDDev managed marker block. Restore validates the
+backup envelope before writing and validates the restored clean state inside the
+same rollback-protected transaction.
 
-The complete managed path set is owned by `cli-tools/nddev_grok_build.py` and
-validated against `build/manifest.json`; do not duplicate it by hand.
+Exact managed files, ownership checks, file modes, backup envelope shape, lock
+locations, lock acquisition algorithm, crash recovery rules, and rollback
+details are source-owned by `cli-tools/nddev_grok_build.py` and checked against
+`build/manifest.json` and `config/nddev-contract.json`.
 
-Every target lifecycle operation first acquires a persistent external bootstrap
-lock under the fixed resolved system temp root, not under the target or
-`target.parent`. The product root is current-user-owned mode `0700`, and the
-persistent lock file is mode `0600`, no-follow opened, inode-checked, and named
-by the full SHA-256 of the product namespace plus canonical target identity.
-The binding JSON is written only after `LOCK_EX` is held and is never unlinked
-on normal release; crash recovery relies on kernel flock release over the same
-persistent path. The manager never derives this root from ambient `TMPDIR` and
-never exposes it to the launched child environment.
-
-After the external lock is held, manager mutations use a target-internal regular
-lock file at `$GROK_HOME/.nddev-grok-build/locks/target.lock`, opened with
-no-follow semantics, mode `0600`, and an exclusive `fcntl.flock` descriptor.
-Release order is target-internal first, external last. While the target-local
-lock is held, only the dedicated `locks/` parent is mode `0500`; the control
-root, backup pool, tmp directory, runtime `HOME`, runtime `TMPDIR`, XDG
-directories, and target root remain writable for the launched CLI. Stale
-held-mode lock parents, stale held-mode control roots from older builds, and
-old directory locks are recovered only after strict real-path, owner, and mode
-checks.
+Target lifecycle commands serialize through manager-owned lifecycle locks.
+Cooperative manager operations for the same target are denied or serialized
+while setup mutation, software mutation, restore, remove, migrate, status-read
+requiring owned state, or managed launch is in progress. The exact bootstrap and
+target-local lock mechanics are intentionally not copied here; use the manager
+source and the public contract fields as the executable reference.
 
 ## Content Setup
 
@@ -69,24 +55,22 @@ memory, subagents, LSP, write, web fetch, or tool search.
 
 `software-status`, `install-cli`, and `update-cli` manage the Grok Build runtime
 separately from setup/profile switching. Production installs use only the
-official stable-channel installer, the exact version argument, and SHA-256
-verification recorded in code-owned public metadata.
+official installer and pin metadata recorded in `cli-tools/nddev_grok_build.py`,
+`build/version.json`, and `references/grok-build-baseline.json`.
 
-The vendor installer runs in a temporary staging area with isolated `HOME`,
-`GROK_HOME`, `GROK_BIN_DIR`, `TMPDIR`, and `PATH`. The manager version-probes
-only the staging `grok` binary, then persists a regular target-owned executable
-at `bin/grok` and the version tree. Staged shell rc files, completions,
-installer `config.toml`, and the vendor `agent` alias are discarded.
+The vendor installer runs in an isolated staging area. The manager validates the
+staged runtime, then persists only target-owned software state defined by the
+manager and public contract. Vendor staging side effects that are not part of
+the managed runtime are discarded.
 Ordinary installer fetch and protocol failures are reported as stable manager
 JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and
-target-owned Grok Build software is current. Managed launch holds the
-external bootstrap lock and target-internal flock descriptor through the child
-process, verifies `bin/grok`, starts a private target-internal launch image under
-`.nddev-grok-build/launch-images`, makes that launch-image directory
-non-writable while the child runs, immediately rechecks the image inode and
-digest, and removes the image after the child exits. Lifecycle, auth, plugin,
+target-owned Grok Build software is current. Managed launch keeps the lifecycle
+serialization guarantee through the child process and runs a verified
+target-owned Grok Build entrypoint. Exact child handoff, executable validation,
+and cleanup details are source-owned by `cli-tools/nddev_grok_build.py` and the
+runtime transaction policy in `build/manifest.json`. Lifecycle, auth, plugin,
 marketplace, and MCP mutating subcommands are denied through managed launch.
 Cooperative same-user manager operations are serialized; direct malicious
 same-user mutation of the target or bootstrap root, especially under `full-auto`

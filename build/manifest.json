@@ -326,6 +326,7 @@
     "external_anchor_hardlink_alias_recovery": true,
     "external_anchor_final_unlinked_on_recovery": false,
     "external_read_only_cold_no_anchor_creates_lock": false,
+    "external_read_only_cold_no_anchor_post_observation_retry": true,
     "external_read_only_seeded_uses_product_coordination": true,
     "same_canonical_target_serialized": true,
     "different_canonical_targets_concurrent_after_handoff": true,

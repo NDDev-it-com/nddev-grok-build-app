@@ -66,6 +66,7 @@ METADATA_MAX_BYTES = 256 * 1024
 CLEANUP_JOURNAL_MAX_BYTES = 32 * 1024 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 ROLLBACK_MAX_ATTEMPTS = 8
+READ_LIFECYCLE_MAX_ATTEMPTS = 4
 GROK_COMMAND = "grok"
 GROK_VERSION = "0.2.112"
 GROK_CHANNEL = "stable"
@@ -254,6 +255,10 @@ FORBIDDEN_MANAGED_PATH_ROOTS = {
 
 class GrokBuildSetupError(Exception):
     """Safe user-facing lifecycle failure."""
+
+
+class ReadLifecycleRetry(Exception):
+    """Internal signal that a cold read raced anchor publication."""
 
 
 class PostCommitCleanupError(GrokBuildSetupError):
@@ -1266,6 +1271,10 @@ def canonical_target_identity(target: Path) -> str:
     return str(target)
 
 
+def product_coordination_namespace_present(product_root: Path) -> bool:
+    return product_root.exists() or product_root.is_symlink()
+
+
 @contextlib.contextmanager
 def read_lifecycle_coordination(target: Path):
     while True:
@@ -1274,13 +1283,22 @@ def read_lifecycle_coordination(target: Path):
         if product is None:
             system_root = bootstrap_system_root()
             product_root = bootstrap_product_root_path(system_root)
-            if product_root.exists() or product_root.is_symlink():
+            if product_coordination_namespace_present(product_root):
                 fail("product lock anchor is missing")
             canonical = validate_target(target, create=False)
-            if product_root.exists() or product_root.is_symlink():
+            if product_coordination_namespace_present(product_root):
                 continue
             missing = not (canonical.exists() or canonical.is_symlink())
-            yield TargetCoordination(canonical, [], False, missing, None, None)
+            try:
+                yield TargetCoordination(canonical, [], False, missing, None, None)
+            except GrokBuildSetupError:
+                if product_coordination_namespace_present(product_root):
+                    raise ReadLifecycleRetry
+                raise
+            except BaseException:
+                raise
+            if product_coordination_namespace_present(product_root):
+                raise ReadLifecycleRetry
             return
         try:
             canonical = validate_target(target, create=False)
@@ -1296,11 +1314,30 @@ def read_lifecycle_coordination(target: Path):
                 release_product_lock(product)
                 product = None
             missing = not (canonical.exists() or canonical.is_symlink())
-            yield TargetCoordination(canonical, [], False, missing, None, target_lock_handle)
+            try:
+                yield TargetCoordination(canonical, [], False, missing, None, target_lock_handle)
+            except BaseException:
+                raise
+            if target_lock_handle is None:
+                target_anchor = bootstrap_lock_path_for_root(product.product_root, identity)
+                if target_anchor.exists() or target_anchor.is_symlink():
+                    fail("target lock anchor appeared without coordination")
             return
         finally:
             release_external_target_lock(target_lock_handle)
             release_product_lock(product)
+
+
+def read_lifecycle_payload(target: Path, reader: Any) -> Any:
+    for attempt in range(READ_LIFECYCLE_MAX_ATTEMPTS):
+        try:
+            with read_lifecycle_coordination(target) as coordination:
+                return reader(coordination.target)
+        except ReadLifecycleRetry:
+            if attempt + 1 >= READ_LIFECYCLE_MAX_ATTEMPTS:
+                fail("read-only lifecycle coordination changed during inspection")
+            continue
+    fail("read-only lifecycle coordination changed during inspection")
 
 
 @contextlib.contextmanager
@@ -3278,8 +3315,7 @@ def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 def status_payload(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target) as target:
-        return status_payload_locked(target)
+    return read_lifecycle_payload(target, status_payload_locked)
 
 
 def status_payload_locked(target: Path) -> dict[str, Any]:
@@ -6160,8 +6196,7 @@ def software_directory_mode_drift(path: Path, label: str) -> str | None:
 
 def software_status(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target) as target:
-        return software_status_locked(target)
+    return read_lifecycle_payload(target, software_status_locked)
 
 
 def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> dict[str, Any]:
@@ -6614,45 +6649,47 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
 
 def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target) as target:
+    def build_plan(target: Path) -> dict[str, Any]:
         status = status_payload_locked(target)
         canonical_target = validate_target(target, create=False)
         current = read_stamp(canonical_target) if status["managed"] else None
         files = desired_files(canonical_target, setup, profile)
         changed = changed_paths_for_desired_files(canonical_target, current, files)
         removed = removed_paths_for_stamp_replacement(current, files)
-    operation = "install"
-    backup_required = False
-    if status["managed"]:
-        if status.get("legacy"):
-            operation = "migrate"
-            backup_required = True
-        else:
-            operation = (
-                "update"
-                if status["setup_id"] == setup["id"] and status["profile_id"] == profile["id"]
-                else "switch"
-            )
-            backup_required = (
-                status["setup_id"] != setup["id"] or status["profile_id"] != profile["id"]
-            )
-    return {
-        "operation": operation,
-        "setup_id": setup["id"],
-        "profile_id": profile["id"],
-        "target": str(canonical_target),
-        "current_setup_id": status["setup_id"],
-        "current_profile_id": status["profile_id"],
-        "current_schema_version": status["schema_version"],
-        "drift": status["drift"],
-        "changed": changed,
-        "removed": removed,
-        "backup_required": backup_required,
-        "mutates": False,
-        "cleanup_pending": status.get("cleanup_pending", False),
-        "cleanup_pending_roots": status.get("cleanup_pending_roots", 0),
-        "cleanup_pending_entries": status.get("cleanup_pending_entries", 0),
-    }
+        operation = "install"
+        backup_required = False
+        if status["managed"]:
+            if status.get("legacy"):
+                operation = "migrate"
+                backup_required = True
+            else:
+                operation = (
+                    "update"
+                    if status["setup_id"] == setup["id"] and status["profile_id"] == profile["id"]
+                    else "switch"
+                )
+                backup_required = (
+                    status["setup_id"] != setup["id"] or status["profile_id"] != profile["id"]
+                )
+        return {
+            "operation": operation,
+            "setup_id": setup["id"],
+            "profile_id": profile["id"],
+            "target": str(canonical_target),
+            "current_setup_id": status["setup_id"],
+            "current_profile_id": status["profile_id"],
+            "current_schema_version": status["schema_version"],
+            "drift": status["drift"],
+            "changed": changed,
+            "removed": removed,
+            "backup_required": backup_required,
+            "mutates": False,
+            "cleanup_pending": status.get("cleanup_pending", False),
+            "cleanup_pending_roots": status.get("cleanup_pending_roots", 0),
+            "cleanup_pending_entries": status.get("cleanup_pending_entries", 0),
+        }
+
+    return read_lifecycle_payload(target, build_plan)
 
 
 def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:

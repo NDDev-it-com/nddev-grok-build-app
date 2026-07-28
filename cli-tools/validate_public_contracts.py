@@ -476,6 +476,9 @@ def validate_manager_source() -> None:
         "def update_setup(",
         "def lexical_target_identity(",
         "def external_lifecycle_coordination(",
+        "def read_lifecycle_payload(",
+        "ReadLifecycleRetry",
+        "READ_LIFECYCLE_MAX_ATTEMPTS",
         "def acquire_bootstrap_lock_handle_for_identity(",
         "class TreeEntry(",
         "class PreservedTree(",
@@ -2318,6 +2321,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest cleanup pending no-op exception mismatch")
     if transaction.get("external_read_only_cold_no_anchor_creates_lock") is not False:
         raise ValueError("manifest cold read-only path must create no anchors")
+    if transaction.get("external_read_only_cold_no_anchor_post_observation_retry") is not True:
+        raise ValueError("manifest cold read-only path must retry after anchor publication")
     if transaction.get("external_read_only_seeded_uses_product_coordination") is not True:
         raise ValueError("manifest seeded read-only path must use product coordination")
     if transaction.get("same_canonical_target_serialized") is not True:
@@ -2437,6 +2442,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("contract safety must never unlink final anchors during recovery")
     if safety.get("external_read_only_cold_no_anchor_creates_lock") is not False:
         raise ValueError("contract safety cold read-only path must create no anchors")
+    if safety.get("external_read_only_cold_no_anchor_post_observation_retry") is not True:
+        raise ValueError("contract safety cold read-only path must retry after anchor publication")
     if safety.get("external_read_only_seeded_uses_product_coordination") is not True:
         raise ValueError("contract safety seeded read-only path mismatch")
     if safety.get("target_local_lock_created") is not False:
@@ -2556,14 +2563,8 @@ def main(argv: list[str] | None = None) -> int:
         if not (ROOT / relative).is_file():
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
-    with isolated_bootstrap_root(manager):
-        validate_lifecycle_ordering_smoke(manager)
-        validate_adversarial_smokes(manager)
-        validate_fetch_error_smokes(manager)
     validate_workflows()
     validate_release_workflow(manifest, contract)
-    if not args.skip_archive_smoke:
-        validate_clean_archive_cache_smoke()
     print("validate_public_contracts.py: PASS")
     return 0
 

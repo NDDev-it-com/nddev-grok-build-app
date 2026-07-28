@@ -459,6 +459,11 @@ def validate_manager_source() -> None:
         "def publish_product_anchor_if_missing(",
         "def publish_target_anchor_if_missing(",
         "def recover_anchor_publication_alias(",
+        "def recover_cleanup_journal_publication_alias(",
+        "def write_cleanup_journal(",
+        "CLEANUP_JOURNAL_NAME",
+        "cleanup_pending_roots",
+        "cleanup_pending_entries",
         "def acquire_product_lock(",
         "def open_external_target_lock(",
         "def acquire_bootstrap_lock(",
@@ -488,6 +493,14 @@ def validate_manager_source() -> None:
     ):
         if marker not in source:
             raise ValueError(f"manager source is missing lock invariant marker: {marker}")
+    cleanup_start = source.index("def write_cleanup_journal(")
+    cleanup_end = source.index("def cleanup_root_declared_paths(")
+    cleanup_source = source[cleanup_start:cleanup_end]
+    for marker in ("os.replace(", "replace_file_durable("):
+        if marker in cleanup_source:
+            raise ValueError(f"cleanup journal publication must not use {marker}")
+    if "target / root[" in source or "target / relative_root" in source:
+        raise ValueError("cleanup drain must not derive deletion paths from JSON paths")
 
 
 def validate_public_documented_commands() -> None:
@@ -1060,6 +1073,7 @@ def snapshot_path(path: Path) -> dict[str, Any]:
         "dev": info.st_dev,
         "ino": info.st_ino,
         "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
         "sha256": digest,
         "link_target": link_target,
     }
@@ -2266,6 +2280,34 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest must declare hardlink alias recovery")
     if transaction.get("external_anchor_final_unlinked_on_recovery") is not False:
         raise ValueError("manifest must never unlink final anchors during recovery")
+    if transaction.get("cleanup_journal_immutable_pending") is not True:
+        raise ValueError("manifest must declare immutable pending cleanup journal")
+    if transaction.get("cleanup_journal_top_level_pending") is not True:
+        raise ValueError("manifest must declare top-level cleanup_pending")
+    if "hard-link no-replace" not in str(transaction.get("cleanup_journal_publication", "")):
+        raise ValueError("manifest must declare cleanup journal hard-link no-replace publication")
+    if transaction.get("cleanup_journal_commit_point") != "final-path publication":
+        raise ValueError("manifest cleanup journal commit point mismatch")
+    if transaction.get("cleanup_journal_hardlink_alias_recovery") != (
+        "mutation-only under exclusive target coordination"
+    ):
+        raise ValueError("manifest cleanup journal alias recovery scope mismatch")
+    if transaction.get("cleanup_journal_read_only_recovery") is not False:
+        raise ValueError("manifest read-only cleanup journal recovery must be false")
+    if transaction.get("cleanup_journal_fixed_parent") != "$GROK_HOME/.nddev-grok-build/tmp":
+        raise ValueError("manifest cleanup journal fixed parent mismatch")
+    if transaction.get("cleanup_journal_path") != (
+        "$GROK_HOME/.nddev-grok-build/cleanup/NDDEV-GROK-BUILD-CLEANUP.json"
+    ):
+        raise ValueError("manifest cleanup journal path mismatch")
+    if transaction.get("cleanup_pending_status_metadata") != [
+        "cleanup_pending",
+        "cleanup_pending_roots",
+        "cleanup_pending_entries",
+    ]:
+        raise ValueError("manifest cleanup pending metadata mismatch")
+    if "lifecycle work" not in str(transaction.get("cleanup_pending_noop_exception", "")):
+        raise ValueError("manifest cleanup pending no-op exception mismatch")
     if transaction.get("external_read_only_cold_no_anchor_creates_lock") is not False:
         raise ValueError("manifest cold read-only path must create no anchors")
     if transaction.get("external_read_only_seeded_uses_product_coordination") is not True:
@@ -2309,6 +2351,20 @@ def main(argv: list[str] | None = None) -> int:
         transaction.get("same_uid_malicious_mutation_boundary", "")
     ).replace("-", " "):
         raise ValueError("manifest must document the sandbox-off same-user boundary")
+    functionality = contract.get("safety")
+    if not isinstance(functionality, dict):
+        raise ValueError("contract safety missing")
+    for key in (
+        "cleanup_journal_immutable_pending",
+        "cleanup_journal_top_level_pending",
+        "cleanup_journal_mutation_only_recovery",
+        "cleanup_pending_status_plan_software_status_metadata",
+        "cleanup_pending_drain_is_lifecycle_work",
+    ):
+        if functionality.get(key) is not True:
+            raise ValueError(f"contract safety must set {key}=true")
+    if functionality.get("cleanup_journal_read_only_recovery") is not False:
+        raise ValueError("contract safety must disable read-only cleanup journal recovery")
     managed_state = contract.get("managed_state")
     if not isinstance(managed_state, dict):
         raise ValueError("contract managed_state missing")

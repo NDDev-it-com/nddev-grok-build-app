@@ -40,10 +40,12 @@ STAMP_NAME = "NDDEV-GROK-BUILD-SETUP.json"
 BACKUP_NAME = "NDDEV-GROK-BUILD-BACKUP.json"
 SOFTWARE_STAMP_NAME = "NDDEV-GROK-BUILD-SOFTWARE.json"
 CONTROL_DIR_NAME = ".nddev-grok-build"
+ROLLBACK_INTENT_NAME = "NDDEV-GROK-BUILD-ROLLBACK.json"
 STAMP_SCHEMA_VERSION = 2
 LEGACY_STAMP_SCHEMA_VERSION = 1
 SOFTWARE_STAMP_SCHEMA_VERSION = 2
 CLEANUP_JOURNAL_SCHEMA_VERSION = 1
+ROLLBACK_INTENT_SCHEMA_VERSION = 1
 MANAGED_BEGIN = "# BEGIN NDDEV-GROK-BUILD MANAGED"
 MANAGED_END = "# END NDDEV-GROK-BUILD MANAGED"
 OWNER_FILE_MODE = 0o600
@@ -605,7 +607,10 @@ def bootstrap_lock_digest(identity: str) -> str:
 
 
 def bootstrap_lock_path_for_root(product_root: Path, identity: str) -> Path:
-    return target_lock_root_path(product_root) / f"{bootstrap_lock_digest(identity)}{TARGET_LOCK_SUFFIX}"
+    return (
+        target_lock_root_path(product_root)
+        / f"{bootstrap_lock_digest(identity)}{TARGET_LOCK_SUFFIX}"
+    )
 
 
 def bootstrap_lock_path(identity: str) -> Path:
@@ -786,9 +791,7 @@ def recover_anchor_publication_alias(
     identity: str | None,
 ) -> None:
     if identity is None:
-        opened = require_product_lock_descriptor(
-            descriptor, path, allow_recoverable_alias=True
-        )
+        opened = require_product_lock_descriptor(descriptor, path, allow_recoverable_alias=True)
     else:
         opened = require_bootstrap_lock_descriptor(
             descriptor, path, identity, allow_recoverable_alias=True
@@ -1037,9 +1040,11 @@ def restore_unpublished_product_root(
     if product_root_preexisting and product_root_mtime_ns is not None:
         restore_directory_mtime(product_root, product_root_mtime_ns, "product lock root")
         return
-    if product_anchor_published or product_anchor_path(product_root).exists() or product_anchor_path(
-        product_root
-    ).is_symlink():
+    if (
+        product_anchor_published
+        or product_anchor_path(product_root).exists()
+        or product_anchor_path(product_root).is_symlink()
+    ):
         return
     if product_root.exists() and not product_root.is_symlink():
         remove_empty_directory_if_created(product_root, existed_before=False)
@@ -1051,7 +1056,9 @@ def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle 
     product_root = bootstrap_product_root_path(system_root)
     product_root_preexisting = product_root.exists() or product_root.is_symlink()
     product_root_mtime_ns: int | None = None
-    system_root_mtime_ns = int(require_real_directory(system_root, "system bootstrap root").st_mtime_ns)
+    system_root_mtime_ns = int(
+        require_real_directory(system_root, "system bootstrap root").st_mtime_ns
+    )
     product_anchor_published = False
     if create:
         try:
@@ -1097,9 +1104,7 @@ def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle 
         lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(descriptor, lock_mode)
         if needs_alias_recovery:
-            recover_anchor_publication_alias(
-                descriptor, path, label="product lock", identity=None
-            )
+            recover_anchor_publication_alias(descriptor, path, label="product lock", identity=None)
         require_product_lock_descriptor(descriptor, path)
         return ProductLockHandle(
             descriptor=descriptor,
@@ -1483,6 +1488,10 @@ def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
                     failed = True
                     raise
                 return
+            if not (
+                cleanup_journal_path(target).exists() or cleanup_journal_path(target).is_symlink()
+            ):
+                recover_unjournaled_precommit_stages(target)
             drain_cleanup_journal(target)
             target_dir_snapshot = snapshot_directory_entry(target, "target")
             try:
@@ -1830,6 +1839,479 @@ def cleanup_empty_preservation_stage_root(stage_root: Path) -> None:
         remove_empty_directory_if_created(stage_root.parent.parent, existed_before=False)
 
 
+def target_relative_path(target: Path, path: Path, label: str) -> str:
+    try:
+        relative = path.relative_to(target).as_posix()
+    except ValueError:
+        fail(f"{label} rollback source is outside the target")
+    if (
+        not relative
+        or relative == "."
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+    ):
+        fail(f"{label} rollback source is invalid")
+    if len(relative.encode("utf-8")) > CLEANUP_MAX_RELATIVE_BYTES:
+        fail(f"{label} rollback source is too long")
+    return relative
+
+
+def rollback_intent_path(stage_root: Path) -> Path:
+    return stage_root / ROLLBACK_INTENT_NAME
+
+
+def is_machine_rollback_stage_name(name: str) -> bool:
+    return re.fullmatch(r"rollback\.[0-9a-f]{16}", name) is not None
+
+
+def is_machine_backup_stage_name(name: str) -> bool:
+    return re.fullmatch(r"backup\.[0-9]\.[0-9]{1,20}\.[0-9]{1,20}", name) is not None
+
+
+def file_snapshot_payload(snapshot: FileSnapshot) -> dict[str, Any]:
+    return {
+        "present": snapshot.data is not None,
+        "mode": snapshot.mode,
+        "mtime_ns": snapshot.mtime_ns,
+        "dev": snapshot.dev,
+        "ino": snapshot.ino,
+        "size": len(snapshot.data) if snapshot.data is not None else None,
+        "sha256": sha256_bytes(snapshot.data) if snapshot.data is not None else None,
+    }
+
+
+def tree_entry_payload(entry: TreeEntry) -> dict[str, Any]:
+    return cleanup_entry_payload(".", entry)
+
+
+def tree_entry_from_payload(payload: Any, label: str) -> TreeEntry:
+    if not isinstance(payload, dict) or set(payload) != {
+        "path",
+        "kind",
+        "mode",
+        "uid",
+        "nlink",
+        "size",
+        "dev",
+        "ino",
+        "mtime_ns",
+        "sha256",
+    }:
+        fail(f"{label} schema is invalid")
+    if payload["path"] != ".":
+        fail(f"{label} path is invalid")
+    if payload["kind"] == "absent":
+        return absent_tree_entry()
+    if payload["kind"] != "dir":
+        fail(f"{label} kind is invalid")
+    return TreeEntry(
+        "dir",
+        payload["mode"],
+        None,
+        payload["size"],
+        payload["dev"],
+        payload["ino"],
+        payload["mtime_ns"],
+        payload["uid"],
+        payload["nlink"],
+    )
+
+
+def tree_snapshot_payload(snapshot: dict[str, TreeEntry]) -> list[dict[str, Any]]:
+    return [
+        cleanup_entry_payload(relative, entry)
+        for relative, entry in sorted(snapshot.items(), key=lambda item: item[0])
+    ]
+
+
+def rollback_entry_payload(entry: PreservedFile | PreservedTree, kind: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "source_kind": kind,
+        "source_relative": target_relative_path(entry.target, entry.path, entry.label),
+        "tombstone_relative": None if entry.backup_path is None else entry.backup_path.name,
+        "label": entry.label,
+        "max_bytes": entry.max_bytes,
+        "parent_mtime_ns": entry.parent_mtime_ns,
+    }
+    if kind == "file":
+        payload["snapshot"] = file_snapshot_payload(entry.snapshot)  # type: ignore[arg-type]
+    elif kind == "tree":
+        payload["snapshot"] = tree_snapshot_payload(entry.snapshot)  # type: ignore[arg-type]
+    else:
+        fail("rollback entry kind is invalid")
+    return payload
+
+
+def read_rollback_intent(stage_root: Path, target: Path) -> dict[str, Any]:
+    path = rollback_intent_path(stage_root)
+    if not (path.exists() or path.is_symlink()):
+        fail("rollback stage is missing its recovery intent")
+    payload = read_json_file(
+        path,
+        max_bytes=CLEANUP_JOURNAL_MAX_BYTES,
+        label=ROLLBACK_INTENT_NAME,
+        expected_mode=OWNER_FILE_MODE,
+    )
+    if set(payload) != {
+        "schema_version",
+        "product_name",
+        "canonical_target",
+        "target_directory",
+        "stage_root",
+        "entries",
+    }:
+        fail("rollback recovery intent schema is invalid")
+    if payload["schema_version"] != ROLLBACK_INTENT_SCHEMA_VERSION:
+        fail("rollback recovery intent schema is unsupported")
+    if payload["product_name"] != PRODUCT_NAME:
+        fail("rollback recovery intent belongs to another product")
+    if payload["canonical_target"] != str(target):
+        fail("rollback recovery intent is bound to another target")
+    tree_entry_from_payload(payload["target_directory"], "rollback recovery target directory")
+    if payload["stage_root"] != stage_root.name:
+        fail("rollback recovery intent is bound to another stage")
+    if not isinstance(payload["entries"], list) or len(payload["entries"]) > CLEANUP_MAX_ENTRIES:
+        fail("rollback recovery intent entries are invalid")
+    seen_sources: set[str] = set()
+    seen_backups: set[str] = set()
+    for item in payload["entries"]:
+        if not isinstance(item, dict) or set(item) != {
+            "kind",
+            "source_kind",
+            "source_relative",
+            "tombstone_relative",
+            "label",
+            "max_bytes",
+            "parent_mtime_ns",
+            "snapshot",
+        }:
+            fail("rollback recovery intent entry schema is invalid")
+        if item["kind"] not in {"file", "tree"}:
+            fail("rollback recovery intent entry kind is invalid")
+        if item["source_kind"] != item["kind"]:
+            fail("rollback recovery intent source kind is invalid")
+        source = item["source_relative"]
+        if (
+            not isinstance(source, str)
+            or not source
+            or source == "."
+            or Path(source).is_absolute()
+            or ".." in Path(source).parts
+            or len(source.encode("utf-8")) > CLEANUP_MAX_RELATIVE_BYTES
+        ):
+            fail("rollback recovery intent source is invalid")
+        if source in seen_sources:
+            fail("rollback recovery intent has duplicate sources")
+        seen_sources.add(source)
+        backup = item["tombstone_relative"]
+        if backup is not None:
+            if (
+                not isinstance(backup, str)
+                or not backup
+                or backup == ROLLBACK_INTENT_NAME
+                or "/" in backup
+                or "\\" in backup
+                or backup in {".", ".."}
+                or len(backup.encode("utf-8")) > CLEANUP_MAX_RELATIVE_BYTES
+            ):
+                fail("rollback recovery intent backup is invalid")
+            if backup in seen_backups:
+                fail("rollback recovery intent has duplicate backups")
+            seen_backups.add(backup)
+        if not isinstance(item["label"], str) or not item["label"]:
+            fail("rollback recovery intent label is invalid")
+        if not isinstance(item["max_bytes"], int) or item["max_bytes"] <= 0:
+            fail("rollback recovery intent bound is invalid")
+        parent_mtime_ns = item["parent_mtime_ns"]
+        if parent_mtime_ns is not None and (
+            not isinstance(parent_mtime_ns, int) or parent_mtime_ns < 0
+        ):
+            fail("rollback recovery intent parent mtime is invalid")
+    return payload
+
+
+def payload_file_snapshot_matches(
+    path: Path, payload: dict[str, Any], max_bytes: int, label: str
+) -> bytes:
+    data = read_existing_file(path, max_bytes=max_bytes, label=label)
+    if data is None:
+        fail(f"{label} disappeared while reading rollback recovery state")
+    info = require_existing_managed_file(path, label, max_bytes=max_bytes)
+    if info is None:
+        fail(f"{label} disappeared while reading rollback recovery state")
+    expected_size = payload["size"]
+    expected_sha = payload["sha256"]
+    if (
+        stat.S_IMODE(info.st_mode) != payload["mode"]
+        or int(info.st_mtime_ns) != payload["mtime_ns"]
+        or int(info.st_dev) != payload["dev"]
+        or int(info.st_ino) != payload["ino"]
+        or int(info.st_size) != expected_size
+        or sha256_bytes(data) != expected_sha
+    ):
+        fail(f"{label} does not match rollback recovery authority")
+    return data
+
+
+def rollback_file_entry_from_intent(
+    target: Path, stage_root: Path, item: dict[str, Any]
+) -> PreservedFile:
+    snapshot_payload = item["snapshot"]
+    if not isinstance(snapshot_payload, dict) or set(snapshot_payload) != {
+        "present",
+        "mode",
+        "mtime_ns",
+        "dev",
+        "ino",
+        "size",
+        "sha256",
+    }:
+        fail("rollback file recovery snapshot schema is invalid")
+    source = target / item["source_relative"]
+    backup = None if item["tombstone_relative"] is None else stage_root / item["tombstone_relative"]
+    parent_mtime_ns = item["parent_mtime_ns"]
+    if not snapshot_payload["present"]:
+        return PreservedFile(
+            target,
+            source,
+            item["label"],
+            item["max_bytes"],
+            FileSnapshot(None, None, None, None, None),
+            stage_root,
+            parent_mtime_ns,
+            None,
+        )
+    if backup is not None and (backup.exists() or backup.is_symlink()):
+        data = payload_file_snapshot_matches(
+            backup, snapshot_payload, item["max_bytes"], item["label"]
+        )
+        return PreservedFile(
+            target,
+            source,
+            item["label"],
+            item["max_bytes"],
+            FileSnapshot(
+                data,
+                snapshot_payload["mode"],
+                snapshot_payload["mtime_ns"],
+                snapshot_payload["dev"],
+                snapshot_payload["ino"],
+            ),
+            stage_root,
+            parent_mtime_ns,
+            backup,
+        )
+    if source.exists() or source.is_symlink():
+        data = payload_file_snapshot_matches(
+            source, snapshot_payload, item["max_bytes"], item["label"]
+        )
+        return PreservedFile(
+            target,
+            source,
+            item["label"],
+            item["max_bytes"],
+            FileSnapshot(
+                data,
+                snapshot_payload["mode"],
+                snapshot_payload["mtime_ns"],
+                snapshot_payload["dev"],
+                snapshot_payload["ino"],
+            ),
+            stage_root,
+            parent_mtime_ns,
+            None,
+        )
+    fail(f"{item['label']} rollback recovery object disappeared")
+
+
+def rollback_tree_payload_matches(snapshot: dict[str, TreeEntry], payload: Any, label: str) -> None:
+    if not isinstance(payload, list):
+        fail("rollback tree recovery snapshot schema is invalid")
+    if tree_snapshot_payload(snapshot) != payload:
+        fail(f"{label} does not match rollback recovery authority")
+
+
+def rollback_tree_entry_from_intent(
+    target: Path, stage_root: Path, item: dict[str, Any]
+) -> PreservedTree:
+    source = target / item["source_relative"]
+    backup = None if item["tombstone_relative"] is None else stage_root / item["tombstone_relative"]
+    parent_mtime_ns = item["parent_mtime_ns"]
+    if backup is not None and (backup.exists() or backup.is_symlink()):
+        snapshot = snapshot_tree(backup, max_bytes=item["max_bytes"], label=item["label"])
+        rollback_tree_payload_matches(snapshot, item["snapshot"], item["label"])
+        return PreservedTree(
+            target,
+            source,
+            item["label"],
+            item["max_bytes"],
+            snapshot,
+            stage_root,
+            parent_mtime_ns,
+            backup,
+        )
+    if source.exists() or source.is_symlink():
+        snapshot = snapshot_tree(source, max_bytes=item["max_bytes"], label=item["label"])
+        rollback_tree_payload_matches(snapshot, item["snapshot"], item["label"])
+        return PreservedTree(
+            target,
+            source,
+            item["label"],
+            item["max_bytes"],
+            snapshot,
+            stage_root,
+            parent_mtime_ns,
+            None,
+        )
+    absent = {".": absent_tree_entry()}
+    rollback_tree_payload_matches(absent, item["snapshot"], item["label"])
+    return PreservedTree(
+        target,
+        source,
+        item["label"],
+        item["max_bytes"],
+        absent,
+        stage_root,
+        parent_mtime_ns,
+        None,
+    )
+
+
+def recover_rollback_stage(target: Path, stage_root: Path) -> TreeEntry:
+    info = require_private_directory(stage_root, "rollback recovery stage")
+    if stage_root.parent != control_tmp_dir(target) or not is_machine_rollback_stage_name(
+        stage_root.name
+    ):
+        fail("rollback recovery stage is outside the fixed cleanup parent")
+    require_current_user_owner(info, "rollback recovery stage")
+    intent = read_rollback_intent(stage_root, target)
+    expected_names = {ROLLBACK_INTENT_NAME}
+    files: dict[str, PreservedFile] = {}
+    trees: dict[str, PreservedTree] = {}
+    for item in intent["entries"]:
+        if (
+            item["tombstone_relative"] is not None
+            and (stage_root / item["tombstone_relative"]).exists()
+        ):
+            expected_names.add(item["tombstone_relative"])
+        if item["kind"] == "file":
+            files[item["source_relative"]] = rollback_file_entry_from_intent(
+                target, stage_root, item
+            )
+        else:
+            trees[item["source_relative"]] = rollback_tree_entry_from_intent(
+                target, stage_root, item
+            )
+    actual_names = {entry.name for entry in stage_root.iterdir()}
+    if actual_names != expected_names:
+        fail("rollback recovery stage contains unknown state")
+    restore_preserved_trees_retry(trees)
+    restore_preserved_files_retry(files)
+    remove_tree_until_absent_retry(
+        stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="rollback recovery stage"
+    )
+    return tree_entry_from_payload(intent["target_directory"], "rollback recovery target directory")
+
+
+def recover_backup_stage(target: Path, stage_root: Path) -> None:
+    info = require_private_directory(stage_root, "backup recovery stage")
+    if stage_root.parent != control_tmp_dir(target) or not is_machine_backup_stage_name(
+        stage_root.name
+    ):
+        fail("backup recovery stage is outside the fixed cleanup parent")
+    require_current_user_owner(info, "backup recovery stage")
+    if {entry.name for entry in stage_root.iterdir()} != {BACKUP_NAME}:
+        fail("backup recovery stage contains unknown state")
+    path = stage_root / BACKUP_NAME
+    payload = read_json_file(
+        path,
+        max_bytes=METADATA_MAX_BYTES,
+        label="backup recovery stage",
+        expected_mode=OWNER_FILE_MODE,
+    )
+    slot = payload.get("slot")
+    if not isinstance(slot, int):
+        fail("backup recovery stage slot is invalid")
+    validate_backup_envelope(target, slot, payload)
+    remove_tree_until_absent_retry(
+        stage_root, max_bytes=METADATA_MAX_BYTES, label="backup recovery stage"
+    )
+
+
+def recover_unjournaled_precommit_stages(target: Path) -> None:
+    parent = control_tmp_dir(target)
+    if not (parent.exists() or parent.is_symlink()):
+        return
+    require_private_directory(parent, "cleanup tombstone parent")
+    rollback_stages: list[tuple[Path, bool]] = []
+    backup_stages: list[Path] = []
+    for entry in sorted(parent.iterdir(), key=lambda item: item.name):
+        if is_machine_rollback_stage_name(entry.name):
+            intent = read_rollback_intent(entry, target)
+            rollback_stages.append(
+                (entry, any(item["kind"] == "tree" for item in intent["entries"]))
+            )
+        elif is_machine_backup_stage_name(entry.name):
+            backup_stages.append(entry)
+        else:
+            fail("cleanup tombstone parent contains unknown pre-journal state")
+    target_entries: list[TreeEntry] = []
+    for entry, _has_tree in sorted(rollback_stages, key=lambda item: (not item[1], item[0].name)):
+        target_entries.append(recover_rollback_stage(target, entry))
+    for entry in backup_stages:
+        recover_backup_stage(target, entry)
+    remove_empty_directory_if_created(parent, existed_before=False)
+    remove_empty_directory_if_created(cleanup_root_dir(target), existed_before=False)
+    remove_empty_directory_if_created(managed_control_dir(target), existed_before=False)
+    if target_entries:
+        first = target_entries[0]
+        if any(item != first for item in target_entries):
+            fail("rollback recovery stages disagree on target identity")
+        ensure_directory_entry(target, first, "target")
+
+
+def write_rollback_intent(
+    target: Path,
+    stage_root: Path,
+    entries: dict[str, PreservedFile | PreservedTree],
+    target_entry: TreeEntry,
+) -> None:
+    ordered = sorted(
+        entries.values(), key=lambda item: target_relative_path(target, item.path, item.label)
+    )
+    payload = {
+        "schema_version": ROLLBACK_INTENT_SCHEMA_VERSION,
+        "product_name": PRODUCT_NAME,
+        "canonical_target": str(target),
+        "target_directory": tree_entry_payload(target_entry),
+        "stage_root": stage_root.name,
+        "entries": [
+            rollback_entry_payload(item, "tree" if isinstance(item, PreservedTree) else "file")
+            for item in ordered
+        ],
+    }
+    data = canonical_json(payload)
+    if len(data) > CLEANUP_JOURNAL_MAX_BYTES:
+        fail("cleanup journal exceeds the serialized byte limit")
+    replace_file_durable(
+        rollback_intent_path(stage_root),
+        data,
+        target,
+        mode=OWNER_FILE_MODE,
+        max_bytes=CLEANUP_JOURNAL_MAX_BYTES,
+        label=ROLLBACK_INTENT_NAME,
+        ensure_parent=ensure_private_parent,
+        reader=read_existing_file,
+    )
+    read_rollback_intent(stage_root, target)
+    ensure_cleanup_journal_projected_root_fits(
+        target,
+        stage_root,
+        snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="rollback stage"),
+    )
+
+
 def file_identity_snapshot(
     path: Path,
     *,
@@ -1864,7 +2346,11 @@ def preserve_file_for_rollback(
     reader: Any,
     stage_root: Path,
     expected_mode: int | None = None,
+    intent_entries: dict[str, PreservedFile | PreservedTree] | None = None,
+    target_entry: TreeEntry | None = None,
 ) -> PreservedFile:
+    if target_entry is None:
+        target_entry = snapshot_directory_entry(target, "target")
     parent_mtime_ns = None
     with contextlib.suppress(OSError):
         parent_mtime_ns = int(path.parent.lstat().st_mtime_ns)
@@ -1876,9 +2362,15 @@ def preserve_file_for_rollback(
         expected_mode=expected_mode,
     )
     if snapshot.data is None:
-        return PreservedFile(
+        entry = PreservedFile(
             target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, None
         )
+        if intent_entries is None:
+            write_rollback_intent(target, stage_root, {label: entry}, target_entry)
+        else:
+            intent_entries[label] = entry
+            write_rollback_intent(target, stage_root, intent_entries, target_entry)
+        return entry
     backup_path = (
         stage_root / f"{len(list(stage_root.iterdir()))}.{sha256_bytes(str(path).encode('utf-8'))}"
     )
@@ -1889,6 +2381,11 @@ def preserve_file_for_rollback(
     )
     moved = False
     try:
+        if intent_entries is None:
+            write_rollback_intent(target, stage_root, {label: entry}, target_entry)
+        else:
+            intent_entries[label] = entry
+            write_rollback_intent(target, stage_root, intent_entries, target_entry)
         ensure_cleanup_journal_projected_file_fits(target, stage_root, backup_path, path, snapshot)
         os.replace(path, backup_path)
         moved = True
@@ -1922,6 +2419,25 @@ def restore_parent_mtime(entry: PreservedFile) -> None:
             follow_symlinks=False,
         )
         fsync_directory(entry.path.parent, f"{entry.label} parent mtime restore")
+
+
+def parent_mtime_matches(path: Path, expected_mtime_ns: int | None) -> bool:
+    if expected_mtime_ns is None:
+        return True
+    try:
+        return int(path.parent.lstat().st_mtime_ns) == expected_mtime_ns
+    except OSError:
+        return False
+
+
+def preserved_file_matches(entry: PreservedFile) -> bool:
+    return file_matches_snapshot(
+        entry.path,
+        entry.snapshot,
+        max_bytes=entry.max_bytes,
+        label=entry.label,
+        reader=read_existing_file,
+    ) and parent_mtime_matches(entry.path, entry.parent_mtime_ns)
 
 
 def restore_preserved_file_once(entry: PreservedFile) -> None:
@@ -1976,13 +2492,7 @@ def restore_preserved_files_retry(entries: dict[str, PreservedFile]) -> None:
         entry = entries[key]
         retry_until_exact(
             f"{entry.label} object rollback",
-            lambda item=entry: file_matches_snapshot(
-                item.path,
-                item.snapshot,
-                max_bytes=item.max_bytes,
-                label=item.label,
-                reader=read_existing_file,
-            ),
+            lambda item=entry: preserved_file_matches(item),
             lambda item=entry: restore_preserved_file_once(item),
         )
 
@@ -2011,7 +2521,11 @@ def preserve_tree_for_rollback(
     *,
     label: str,
     max_bytes: int,
+    intent_entries: dict[str, PreservedFile | PreservedTree] | None = None,
+    target_entry: TreeEntry | None = None,
 ) -> PreservedTree:
+    if target_entry is None:
+        target_entry = snapshot_directory_entry(target, "target")
     parent_mtime_ns = None
     with contextlib.suppress(OSError):
         parent_mtime_ns = int(path.parent.lstat().st_mtime_ns)
@@ -2027,6 +2541,11 @@ def preserve_tree_for_rollback(
         target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
     )
     try:
+        if intent_entries is None:
+            write_rollback_intent(target, stage_root, {label: entry}, target_entry)
+        else:
+            intent_entries[label] = entry
+            write_rollback_intent(target, stage_root, intent_entries, target_entry)
         ensure_cleanup_journal_projected_tree_fits(target, stage_root, backup_path, snapshot)
         os.replace(path, backup_path)
         moved = True
@@ -2099,17 +2618,21 @@ def restore_tree_parent_mtime(entry: PreservedTree) -> None:
         fsync_directory(entry.path.parent, f"{entry.label} tree parent mtime restore")
 
 
+def preserved_tree_matches(entry: PreservedTree) -> bool:
+    return tree_matches_snapshot(
+        entry.path,
+        entry.snapshot,
+        max_bytes=entry.max_bytes,
+        label=entry.label,
+    ) and parent_mtime_matches(entry.path, entry.parent_mtime_ns)
+
+
 def restore_preserved_trees_retry(entries: dict[str, PreservedTree]) -> None:
     for key in reversed(tuple(entries)):
         entry = entries[key]
         retry_until_exact(
             f"{entry.label} tree object rollback",
-            lambda item=entry: tree_matches_snapshot(
-                item.path,
-                item.snapshot,
-                max_bytes=item.max_bytes,
-                label=item.label,
-            ),
+            lambda item=entry: preserved_tree_matches(item),
             lambda item=entry: restore_preserved_tree_once(item),
         )
 
@@ -2823,8 +3346,10 @@ def preserve_managed_files(
     unique = tuple(dict.fromkeys(relative_paths))
     if not unique:
         return {}
+    target_entry = snapshot_directory_entry(target, "target")
     stage_root = preservation_stage_root(target, label)
     preserved: dict[str, PreservedFile] = {}
+    intent_entries: dict[str, PreservedFile | PreservedTree] = {}
     for relative in unique:
         preserved[relative] = preserve_file_for_rollback(
             target,
@@ -2833,6 +3358,8 @@ def preserve_managed_files(
             max_bytes=MANAGED_MAX_BYTES,
             reader=read_existing_file,
             stage_root=stage_root,
+            intent_entries=intent_entries,
+            target_entry=target_entry,
         )
     return preserved
 
@@ -3007,7 +3534,6 @@ def cleanup_entry_payload(relative: str, entry: TreeEntry) -> dict[str, Any]:
 
 
 def cleanup_root_payload(target: Path, root: Path) -> dict[str, Any]:
-    name = cleanup_tombstone_name(target, root)
     snapshot = snapshot_tree(root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone")
     return cleanup_root_payload_from_snapshot(target, root, snapshot)
 
@@ -3104,7 +3630,9 @@ def ensure_cleanup_journal_projected_file_fits(
     source_info = stat_existing(source_path, "cleanup journal projected file")
     if source_info is None:
         fail("cleanup journal projected file disappeared")
-    projected = dict(snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone"))
+    projected = dict(
+        snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone")
+    )
     relative = backup_path.relative_to(stage_root).as_posix()
     if relative in projected:
         fail("cleanup journal projected file already exists")
@@ -3118,7 +3646,9 @@ def ensure_cleanup_journal_projected_tree_fits(
     backup_path: Path,
     snapshot: dict[str, TreeEntry],
 ) -> None:
-    projected = dict(snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone"))
+    projected = dict(
+        snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone")
+    )
     prefix = backup_path.relative_to(stage_root).as_posix()
     for relative, entry in snapshot.items():
         projected_relative = prefix if relative == "." else f"{prefix}/{relative}"
@@ -3361,9 +3891,7 @@ def recover_cleanup_journal_publication_alias(target: Path) -> None:
         except OSError as exc:
             fail(f"cleanup journal publication alias cleanup failed: {exc}")
         fsync_directory(path.parent, "cleanup journal publication alias cleanup")
-        cleanup_journal_descriptor_payload(
-            descriptor, path, target, allow_recoverable_alias=False
-        )
+        cleanup_journal_descriptor_payload(descriptor, path, target, allow_recoverable_alias=False)
     finally:
         os.close(descriptor)
 
@@ -3612,7 +4140,9 @@ def cleanup_declared_child_names(entries: list[dict[str, Any]]) -> dict[str, set
     return children
 
 
-def cleanup_remaining_child_names(root_path: Path, entries: list[dict[str, Any]]) -> dict[str, set[str]]:
+def cleanup_remaining_child_names(
+    root_path: Path, entries: list[dict[str, Any]]
+) -> dict[str, set[str]]:
     remaining: dict[str, set[str]] = {}
     for entry in entries:
         path = root_path if entry["path"] == "." else root_path / entry["path"]
@@ -3690,7 +4220,6 @@ def drain_cleanup_journal(target: Path) -> None:
         if not (root_path.exists() or root_path.is_symlink()):
             continue
         validate_cleanup_tombstones(target, {"roots": [root]})
-        entries_by_path = {entry["path"]: entry for entry in root["entries"]}
         for entry in sorted(
             root["entries"], key=lambda item: len(Path(item["path"]).parts), reverse=True
         ):
@@ -4185,7 +4714,9 @@ def begin_backup_transaction(target: Path, stamp: dict[str, Any]) -> BackupTrans
         expected_mode=OWNER_FILE_MODE,
     )
     validate_backup_envelope(target, slot, written)
-    return BackupTransaction(slot=slot, stage_root=stage_root, stage_path=stage_path, envelope=envelope)
+    return BackupTransaction(
+        slot=slot, stage_root=stage_root, stage_path=stage_path, envelope=envelope
+    )
 
 
 def cleanup_backup_transaction_stage(transaction: BackupTransaction) -> None:
@@ -4204,6 +4735,8 @@ def commit_backup_transaction(target: Path, transaction: BackupTransaction | Non
     ensure_private_directory(slot_dir, "backup slot")
     envelope_path = slot_dir / BACKUP_NAME
     expected = canonical_json(transaction.envelope)
+    target_entry = snapshot_directory_entry(target, "target")
+    stage_root = preservation_stage_root(target, "backup slot rollback")
     preserved = {
         BACKUP_NAME: preserve_file_for_rollback(
             target,
@@ -4211,8 +4744,9 @@ def commit_backup_transaction(target: Path, transaction: BackupTransaction | Non
             label=BACKUP_NAME,
             max_bytes=METADATA_MAX_BYTES,
             reader=read_existing_file,
-            stage_root=preservation_stage_root(target, "backup slot rollback"),
+            stage_root=stage_root,
             expected_mode=OWNER_FILE_MODE,
+            target_entry=target_entry,
         )
     }
     try:
@@ -5148,13 +5682,20 @@ def software_relative_path(target: Path, path: Path) -> str:
 
 
 def preserve_software_files(
-    target: Path, paths: tuple[Path, ...] | list[Path], *, label: str
+    target: Path,
+    paths: tuple[Path, ...] | list[Path],
+    *,
+    label: str,
+    target_entry: TreeEntry | None = None,
 ) -> dict[str, PreservedFile]:
     unique = tuple(dict.fromkeys(paths))
     if not unique:
         return {}
+    if target_entry is None:
+        target_entry = snapshot_directory_entry(target, "target")
     stage_root = preservation_stage_root(target, label)
     preserved: dict[str, PreservedFile] = {}
+    intent_entries: dict[str, PreservedFile | PreservedTree] = {}
     for path in unique:
         relative = software_relative_path(target, path)
         preserved[relative] = preserve_file_for_rollback(
@@ -5164,6 +5705,8 @@ def preserve_software_files(
             max_bytes=SOFTWARE_MAX_BYTES,
             reader=read_optional_software_file_for_atomic,
             stage_root=stage_root,
+            intent_entries=intent_entries,
+            target_entry=target_entry,
         )
     return preserved
 
@@ -5173,6 +5716,7 @@ def snapshot_software_state(
     preserve_paths: tuple[Path, ...] | list[Path] | None = None,
     preserve_trees: tuple[Path, ...] | list[Path] | None = None,
 ) -> SoftwareSnapshot:
+    target_entry = snapshot_directory_entry(target, "target")
     control_root_snapshot = snapshot_directory_entry(
         managed_control_dir(target), "NDDev control root"
     )
@@ -5195,6 +5739,7 @@ def snapshot_software_state(
         target,
         tuple(preserve_paths or ()),
         label="software rollback",
+        target_entry=target_entry,
     )
     preserved_trees: dict[str, PreservedTree] = {}
     for path in tuple(dict.fromkeys(preserve_trees or ())):
@@ -5204,6 +5749,7 @@ def snapshot_software_state(
             path,
             label=relative,
             max_bytes=SOFTWARE_MAX_BYTES,
+            target_entry=target_entry,
         )
     return SoftwareSnapshot(
         control_root_dir=control_root_snapshot,
@@ -5913,7 +6459,9 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
             except BaseException:
                 restore_software_snapshot_retry(target, snapshot)
                 raise
-            final_status = software_status_locked(target, validate_cleanup=not cleanup_pending_result)
+            final_status = software_status_locked(
+                target, validate_cleanup=not cleanup_pending_result
+            )
             return {
                 "schema_version": 1,
                 "command": command,

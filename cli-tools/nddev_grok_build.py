@@ -2031,6 +2031,19 @@ def read_rollback_intent(stage_root: Path, target: Path) -> dict[str, Any]:
     return payload
 
 
+def recover_empty_preintent_stage(target: Path, stage_root: Path, label: str) -> None:
+    info = require_private_directory(stage_root, label)
+    if stage_root.parent != control_tmp_dir(target):
+        fail(f"{label} is outside the fixed cleanup parent")
+    require_current_user_owner(info, label)
+    try:
+        next(stage_root.iterdir())
+    except StopIteration:
+        durable_rmdir(stage_root, label)
+        return
+    fail(f"{label} contains unknown pre-intent state")
+
+
 def payload_file_snapshot_matches(
     path: Path, payload: dict[str, Any], max_bytes: int, label: str
 ) -> bytes:
@@ -2185,6 +2198,11 @@ def recover_rollback_stage(target: Path, stage_root: Path) -> TreeEntry:
     ):
         fail("rollback recovery stage is outside the fixed cleanup parent")
     require_current_user_owner(info, "rollback recovery stage")
+    if not (
+        rollback_intent_path(stage_root).exists() or rollback_intent_path(stage_root).is_symlink()
+    ):
+        recover_empty_preintent_stage(target, stage_root, "rollback recovery stage")
+        return snapshot_directory_entry(target, "target")
     intent = read_rollback_intent(stage_root, target)
     expected_names = {ROLLBACK_INTENT_NAME}
     files: dict[str, PreservedFile] = {}
@@ -2221,7 +2239,11 @@ def recover_backup_stage(target: Path, stage_root: Path) -> None:
     ):
         fail("backup recovery stage is outside the fixed cleanup parent")
     require_current_user_owner(info, "backup recovery stage")
-    if {entry.name for entry in stage_root.iterdir()} != {BACKUP_NAME}:
+    actual_names = {entry.name for entry in stage_root.iterdir()}
+    if not actual_names:
+        recover_empty_preintent_stage(target, stage_root, "backup recovery stage")
+        return
+    if actual_names != {BACKUP_NAME}:
         fail("backup recovery stage contains unknown state")
     path = stage_root / BACKUP_NAME
     payload = read_json_file(
@@ -2248,6 +2270,11 @@ def recover_unjournaled_precommit_stages(target: Path) -> None:
     backup_stages: list[Path] = []
     for entry in sorted(parent.iterdir(), key=lambda item: item.name):
         if is_machine_rollback_stage_name(entry.name):
+            if not (
+                rollback_intent_path(entry).exists() or rollback_intent_path(entry).is_symlink()
+            ):
+                recover_empty_preintent_stage(target, entry, "rollback recovery stage")
+                continue
             intent = read_rollback_intent(entry, target)
             rollback_stages.append(
                 (entry, any(item["kind"] == "tree" for item in intent["entries"]))
@@ -4038,7 +4065,7 @@ def require_valid_pending_cleanup_after_failure(target: Path) -> None:
 def post_commit_cleanup_failure(target: Path, cause: BaseException) -> bool:
     try:
         require_valid_pending_cleanup_after_failure(target)
-    except GrokBuildSetupError as validation_error:
+    except BaseException as validation_error:
         raise PostCommitCleanupError(str(validation_error)) from cause
     return True
 
@@ -4113,8 +4140,8 @@ def write_cleanup_journal(target: Path, roots: list[Path]) -> bool:
         return False
     try:
         read_cleanup_journal(target)
-    except GrokBuildSetupError as exc:
-        raise PostCommitCleanupError(str(exc)) from exc
+    except BaseException as exc:
+        return post_commit_cleanup_failure(target, exc)
     return True
 
 
@@ -4284,7 +4311,7 @@ def finish_journaled_cleanup(target: Path, roots: list[Path], cleanup: Any) -> b
     try:
         drain_cleanup_journal(target)
         return False
-    except Exception as exc:
+    except BaseException as exc:
         return post_commit_cleanup_failure(target, exc)
 
 

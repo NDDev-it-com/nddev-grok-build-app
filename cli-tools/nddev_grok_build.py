@@ -1615,6 +1615,8 @@ def require_existing_managed_file(
     require_current_user_owner(info, label)
     if info.st_nlink != 1:
         fail(f"{label} must not be a hardlink")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        fail(f"{label} must not be group- or world-writable")
     if expected_mode is not None and stat.S_IMODE(info.st_mode) != expected_mode:
         fail(f"{label} must have mode {expected_mode:04o}")
     if info.st_size > max_bytes:
@@ -1622,19 +1624,93 @@ def require_existing_managed_file(
     return info
 
 
+def require_existing_file_stat_invariants(
+    info: os.stat_result,
+    label: str,
+    *,
+    max_bytes: int,
+    expected_mode: int | None = None,
+) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file")
+    require_current_user_owner(info, label)
+    if info.st_nlink != 1:
+        fail(f"{label} must not be a hardlink")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        fail(f"{label} must not be group- or world-writable")
+    if expected_mode is not None and mode != expected_mode:
+        fail(f"{label} must have mode {expected_mode:04o}")
+    if info.st_size > max_bytes:
+        fail(f"{label} is too large")
+
+
 def read_existing_file(
     path: Path, *, max_bytes: int, label: str, expected_mode: int | None = None
 ) -> bytes | None:
-    info = require_existing_managed_file(
+    before = require_existing_managed_file(
         path, label, max_bytes=max_bytes, expected_mode=expected_mode
     )
-    if info is None:
+    if before is None:
         return None
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        fail(f"{label} is too large")
-    return data
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} open failed: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            fail(f"{label} changed while opening")
+        require_existing_file_stat_invariants(
+            opened, label, max_bytes=max_bytes, expected_mode=expected_mode
+        )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                fail(f"{label} is too large")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        fail(f"{label} changed while reading")
+    require_existing_file_stat_invariants(
+        after, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
+    final = require_existing_managed_file(
+        path, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
+    if final is None:
+        fail(f"{label} disappeared while reading")
+    if (
+        final.st_dev,
+        final.st_ino,
+        final.st_size,
+        final.st_mtime_ns,
+        final.st_uid,
+        final.st_nlink,
+        stat.S_IMODE(final.st_mode),
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_uid,
+        before.st_nlink,
+        stat.S_IMODE(before.st_mode),
+    ):
+        fail(f"{label} changed while reading")
+    return b"".join(chunks)
 
 
 def fsync_directory(path: Path, label: str) -> None:

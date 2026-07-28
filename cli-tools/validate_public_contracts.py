@@ -486,6 +486,11 @@ def validate_manager_source() -> None:
         "def preserve_tree_for_rollback(",
         "def validate_backup_slot_topology(",
         "validate_backup_slot_topology(envelope_path",
+        "def require_existing_file_stat_invariants(",
+        "def read_existing_file(",
+        "os.open(path, flags)",
+        "os.fstat(descriptor)",
+        "final = require_existing_managed_file(",
         "lock_parent: dict[str, TreeEntry]",
         "snapshot.lock_parent",
         "def require_command_supported_host(",
@@ -505,6 +510,21 @@ def validate_manager_source() -> None:
             raise ValueError(f"cleanup journal publication must not use {marker}")
     if "target / root[" in source or "target / relative_root" in source:
         raise ValueError("cleanup drain must not derive deletion paths from JSON paths")
+    read_start = source.index("def read_existing_file(")
+    read_end = source.index("def fsync_directory(")
+    read_source = source[read_start:read_end]
+    if ".open(\"rb\")" in read_source or ".open('rb')" in read_source:
+        raise ValueError("managed metadata reads must not reopen by pathname")
+    for marker in (
+        "O_NOFOLLOW",
+        "require_existing_file_stat_invariants(",
+        "os.open(path, flags)",
+        "os.fstat(descriptor)",
+        "final = require_existing_managed_file(",
+        "st_mtime_ns",
+    ):
+        if marker not in read_source:
+            raise ValueError(f"managed metadata fd reader is missing {marker}")
 
 
 def validate_public_documented_commands() -> None:

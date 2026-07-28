@@ -449,6 +449,18 @@ class ProductLockHandle(NamedTuple):
     mode: int
 
 
+class ColdProductNamespaceSnapshot(NamedTuple):
+    present: bool
+    mode: int | None
+    uid: int | None
+    gid: int | None
+    dev: int | None
+    ino: int | None
+    nlink: int | None
+    size: int | None
+    mtime_ns: int | None
+
+
 class ExternalTargetLockHandle(NamedTuple):
     descriptor: int
     path: Path
@@ -1342,8 +1354,42 @@ def canonical_target_identity(target: Path) -> str:
     return str(target)
 
 
-def product_coordination_namespace_present(product_root: Path) -> bool:
-    return product_root.exists() or product_root.is_symlink()
+def cold_product_namespace_snapshot(product_root: Path) -> ColdProductNamespaceSnapshot:
+    info = stat_existing(product_root, "product lock root")
+    if info is None:
+        return ColdProductNamespaceSnapshot(False, None, None, None, None, None, None, None, None)
+    if not stat.S_ISDIR(info.st_mode):
+        fail("product lock root must be a directory")
+    require_current_user_owner(info, "product lock root")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("product lock root must have mode 0700")
+    try:
+        entries = sorted(product_root.iterdir(), key=lambda item: item.name)
+    except FileNotFoundError:
+        raise ReadLifecycleRetry
+    except OSError as exc:
+        fail(f"product lock namespace cannot be inspected: {exc}")
+    if entries:
+        product_anchor = product_anchor_path(product_root)
+        for entry in entries:
+            if entry.name == PRODUCT_LOCK_FILE_NAME:
+                raise ReadLifecycleRetry
+            if is_anchor_temporary_alias(product_anchor, entry):
+                fail("product lock publication alias exists without product anchor")
+            if entry.name == TARGET_LOCK_ROOT_NAME:
+                fail("target lock namespace exists without product anchor")
+        fail("product lock namespace must be empty without product anchor")
+    return ColdProductNamespaceSnapshot(
+        True,
+        stat.S_IMODE(info.st_mode),
+        int(info.st_uid),
+        int(info.st_gid),
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_nlink),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
 
 
 @contextlib.contextmanager
@@ -1354,21 +1400,23 @@ def read_lifecycle_coordination(target: Path):
         if product is None:
             system_root = bootstrap_system_root()
             product_root = bootstrap_product_root_path(system_root)
-            if product_coordination_namespace_present(product_root):
-                fail("product lock anchor is missing")
+            before = cold_product_namespace_snapshot(product_root)
             canonical = validate_target(target, create=False)
-            if product_coordination_namespace_present(product_root):
-                continue
+            after_target = cold_product_namespace_snapshot(product_root)
+            if after_target != before:
+                raise ReadLifecycleRetry
             missing = not (canonical.exists() or canonical.is_symlink())
             try:
                 yield TargetCoordination(canonical, [], False, missing, None, None)
             except GrokBuildSetupError:
-                if product_coordination_namespace_present(product_root):
+                after_error = cold_product_namespace_snapshot(product_root)
+                if after_error != before:
                     raise ReadLifecycleRetry
                 raise
             except BaseException:
                 raise
-            if product_coordination_namespace_present(product_root):
+            after = cold_product_namespace_snapshot(product_root)
+            if after != before:
                 raise ReadLifecycleRetry
             return
         try:

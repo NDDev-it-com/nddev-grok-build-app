@@ -569,6 +569,7 @@ def validate_manager_source() -> None:
         "package_scripts_disabled",
         "def acquire_bootstrap_lock_handle_for_identity(",
         "class TreeEntry(",
+        "class ColdProductNamespaceSnapshot(",
         "class PreservedTree(",
         "def tree_entry_from_stat(",
         "def preserve_tree_for_rollback(",
@@ -576,6 +577,7 @@ def validate_manager_source() -> None:
         "validate_backup_slot_topology(envelope_path",
         "def require_existing_file_stat_invariants(",
         "def read_existing_file(",
+        "def cold_product_namespace_snapshot(",
         "os.open(path, flags)",
         "os.fstat(descriptor)",
         "final = require_existing_managed_file(",
@@ -2504,6 +2506,13 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest cleanup pending no-op exception mismatch")
     if transaction.get("external_read_only_cold_no_anchor_creates_lock") is not False:
         raise ValueError("manifest cold read-only path must create no anchors")
+    for key in (
+        "external_read_only_cold_namespace_empty_required",
+        "external_read_only_cold_namespace_entries_fail_closed",
+        "external_read_only_cold_namespace_identity_retry",
+    ):
+        if transaction.get(key) is not True:
+            raise ValueError(f"manifest transaction_policy must set {key}=true")
     if transaction.get("external_read_only_cold_no_anchor_post_observation_retry") is not True:
         raise ValueError("manifest cold read-only path must retry after anchor publication")
     if transaction.get("external_read_only_seeded_uses_product_coordination") is not True:
@@ -2625,6 +2634,13 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("contract safety must never unlink final anchors during recovery")
     if safety.get("external_read_only_cold_no_anchor_creates_lock") is not False:
         raise ValueError("contract safety cold read-only path must create no anchors")
+    for key in (
+        "external_read_only_cold_namespace_empty_required",
+        "external_read_only_cold_namespace_entries_fail_closed",
+        "external_read_only_cold_namespace_identity_retry",
+    ):
+        if safety.get(key) is not True:
+            raise ValueError(f"contract safety must set {key}=true")
     if safety.get("external_read_only_cold_no_anchor_post_observation_retry") is not True:
         raise ValueError("contract safety cold read-only path must retry after anchor publication")
     if safety.get("external_read_only_seeded_uses_product_coordination") is not True:

@@ -12,7 +12,9 @@ import io
 import json
 import os
 import re
+import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -69,9 +71,7 @@ SETUP_ORDER = ["nddev-builder"]
 PROFILE_ORDER = ["full-auto", "safe"]
 GROK_VERSION = "0.2.112"
 NPM_PACKAGE = "@xai-official/grok"
-NPM_INTEGRITY = (
-    "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
-)
+NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
 NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
@@ -367,6 +367,8 @@ def validate_manager_source() -> None:
         "RENAME_NOREPLACE_LINUX",
         "def rename_no_replace(",
         "def write_atomic_anchor(",
+        "def validated_anchor_stage_aliases(",
+        "def drain_anchor_stage_aliases(",
         "def bootstrap_system_root()",
         "def acquire_bootstrap_lock(",
         "def read_lifecycle_payload(",
@@ -422,29 +424,29 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
     body = (
         b"#!/bin/sh\n"
         b"set -eu\n"
-        b"if [ \"${1:-}\" != \"--cwd\" ]; then exit 73; fi\n"
-        b"if [ ! -d \"${2:-}\" ]; then exit 74; fi\n"
-        b"workspace=$(cd \"$2\" && pwd -P)\n"
+        b'if [ "${1:-}" != "--cwd" ]; then exit 73; fi\n'
+        b'if [ ! -d "${2:-}" ]; then exit 74; fi\n'
+        b'workspace=$(cd "$2" && pwd -P)\n'
         b"current=$(pwd -P)\n"
-        b"if [ \"$workspace\" != \"$current\" ]; then exit 75; fi\n"
-        b"mkdir -p \"$HOME/.config/grok-build\"\n"
-        b"mkdir -p \"$XDG_CONFIG_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_CACHE_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_DATA_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_STATE_HOME/grok-build\"\n"
-        b"mkdir -p \"$TMPDIR/grok-build\"\n"
-        b"mkdir -p \"$GROK_HOME/runtime-state\"\n"
-        b"printf home > \"$HOME/.config/grok-build/home.txt\"\n"
-        b"printf config > \"$XDG_CONFIG_HOME/grok-build/config.txt\"\n"
-        b"printf cache > \"$XDG_CACHE_HOME/grok-build/cache.txt\"\n"
-        b"printf data > \"$XDG_DATA_HOME/grok-build/data.txt\"\n"
-        b"printf state > \"$XDG_STATE_HOME/grok-build/session.txt\"\n"
-        b"printf tmp > \"$TMPDIR/grok-build/tmp.txt\"\n"
-        b"printf target > \"$GROK_HOME/runtime-state/target.txt\"\n"
-        b"if rm \"$GROK_HOME/.nddev-grok-build/locks/target.lock\" 2>/dev/null; then exit 70; fi\n"
-        b"if rmdir \"$GROK_HOME/.nddev-grok-build/locks\" 2>/dev/null; then exit 71; fi\n"
-        b"if (printf bad > \"$0\") 2>/dev/null; then exit 72; fi\n"
-        b"printf ok > \"$GROK_HOME/runtime-state/result.txt\"\n"
+        b'if [ "$workspace" != "$current" ]; then exit 75; fi\n'
+        b'mkdir -p "$HOME/.config/grok-build"\n'
+        b'mkdir -p "$XDG_CONFIG_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_CACHE_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_DATA_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_STATE_HOME/grok-build"\n'
+        b'mkdir -p "$TMPDIR/grok-build"\n'
+        b'mkdir -p "$GROK_HOME/runtime-state"\n'
+        b'printf home > "$HOME/.config/grok-build/home.txt"\n'
+        b'printf config > "$XDG_CONFIG_HOME/grok-build/config.txt"\n'
+        b'printf cache > "$XDG_CACHE_HOME/grok-build/cache.txt"\n'
+        b'printf data > "$XDG_DATA_HOME/grok-build/data.txt"\n'
+        b'printf state > "$XDG_STATE_HOME/grok-build/session.txt"\n'
+        b'printf tmp > "$TMPDIR/grok-build/tmp.txt"\n'
+        b'printf target > "$GROK_HOME/runtime-state/target.txt"\n'
+        b'if rm "$GROK_HOME/.nddev-grok-build/locks/target.lock" 2>/dev/null; then exit 70; fi\n'
+        b'if rmdir "$GROK_HOME/.nddev-grok-build/locks" 2>/dev/null; then exit 71; fi\n'
+        b'if (printf bad > "$0") 2>/dev/null; then exit 72; fi\n'
+        b'printf ok > "$GROK_HOME/runtime-state/result.txt"\n'
     )
     install_stub_software(manager, target, body)
     rc = manager.launch(target, ["runtime-write"])
@@ -464,9 +466,15 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
     for path, content in expected.items():
         if path.read_bytes() != content:
             raise ValueError(f"runtime write smoke did not write expected state: {path}")
-    if stat.S_IMODE(manager.managed_control_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+    if (
+        stat.S_IMODE(manager.managed_control_dir(target).lstat().st_mode)
+        != manager.OWNER_DIRECTORY_MODE
+    ):
         raise ValueError("control root must stay writable after launch")
-    if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+    if (
+        stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
+        != manager.OWNER_DIRECTORY_MODE
+    ):
         raise ValueError("lock parent was not restored after launch")
     if manager.launch_image_dir(target).exists():
         raise ValueError("launch image directory was not pruned after launch")
@@ -528,9 +536,7 @@ def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, 
         envelope["files"]["config.toml"] = "!!!!"
 
     def corrupt_digest(envelope: dict[str, Any]) -> None:
-        payload = base64.b64decode(
-            envelope["files"]["config.toml"].encode("ascii"), validate=True
-        )
+        payload = base64.b64decode(envelope["files"]["config.toml"].encode("ascii"), validate=True)
         marker = manager.MANAGED_BEGIN.encode("utf-8")
         if marker not in payload:
             raise ValueError("config.toml backup is missing the managed marker")
@@ -635,7 +641,9 @@ def fork_expect_manager_error(manager: Any, callback: Any, expected: str) -> Non
             except BaseException as exc:
                 send_child_result(write_fd, {"ok": False, "error": repr(exc)})
             else:
-                send_child_result(write_fd, {"ok": False, "error": "operation unexpectedly succeeded"})
+                send_child_result(
+                    write_fd, {"ok": False, "error": "operation unexpectedly succeeded"}
+                )
         finally:
             os._exit(0)
     os.close(write_fd)
@@ -706,6 +714,40 @@ def snapshot_path(path: Path) -> dict[str, Any]:
         "size": info.st_size,
         "sha256": digest,
         "link_target": link_target,
+    }
+
+
+def snapshot_tree(path: Path) -> tuple[tuple[str, dict[str, Any]], ...]:
+    root_snapshot = snapshot_path(path)
+    rows: list[tuple[str, dict[str, Any]]] = [(".", root_snapshot)]
+    if root_snapshot.get("kind") != "directory":
+        return tuple(rows)
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        for child in sorted(current.iterdir(), key=lambda item: item.name, reverse=True):
+            relative = child.relative_to(path).as_posix()
+            child_snapshot = snapshot_path(child)
+            rows.append((relative, child_snapshot))
+            if child_snapshot.get("kind") == "directory":
+                stack.append(child)
+    return tuple(sorted(rows, key=lambda item: item[0]))
+
+
+def directory_exact_metadata(path: Path) -> dict[str, int]:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{path} is not a directory")
+    return {
+        "dev": int(info.st_dev),
+        "ino": int(info.st_ino),
+        "mode": stat.S_IMODE(info.st_mode),
+        "uid": int(info.st_uid),
+        "gid": int(info.st_gid),
+        "nlink": int(info.st_nlink),
+        "size": int(info.st_size),
+        "atime_ns": int(info.st_atime_ns),
+        "mtime_ns": int(info.st_mtime_ns),
     }
 
 
@@ -815,6 +857,34 @@ def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
         manager.release_bootstrap_lock(final_descriptor)
 
 
+def validate_bootstrap_different_target_handoff_smoke(manager: Any, tmp: Path) -> None:
+    first = tmp / "grok-handoff-first"
+    second = tmp / "grok-handoff-second"
+    first.mkdir(mode=0o700)
+    first.chmod(0o700)
+    second.mkdir(mode=0o700)
+    second.chmod(0o700)
+    first_descriptor = manager.acquire_bootstrap_lock(first)
+    try:
+        first_identity = manager.bootstrap_target_identity(first)
+        first_path = manager.bootstrap_lock_path(first_identity)
+        first_info = first_path.lstat()
+        second_descriptor = manager.acquire_bootstrap_lock(second)
+        try:
+            second_identity = manager.bootstrap_target_identity(second)
+            second_path = manager.bootstrap_lock_path(second_identity)
+            second_info = second_path.lstat()
+            if (first_info.st_dev, first_info.st_ino) == (
+                second_info.st_dev,
+                second_info.st_ino,
+            ):
+                raise ValueError("different targets reused the same bootstrap lock inode")
+        finally:
+            manager.release_bootstrap_lock(second_descriptor)
+    finally:
+        manager.release_bootstrap_lock(first_descriptor)
+
+
 def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
     identity = manager.bootstrap_target_identity(target)
     path = manager.bootstrap_lock_path(identity)
@@ -897,7 +967,12 @@ def validate_no_replace_publication_smoke(manager: Any) -> None:
         tmp.chmod(manager.OWNER_DIRECTORY_MODE)
         path = tmp / manager.PRODUCT_LOCK_FILE_NAME
         data = manager.expected_product_lock_binding_bytes()
-        if manager.write_atomic_anchor(path, data, manager.OWNER_FILE_MODE, "validator product lock") is not True:
+        if (
+            manager.write_atomic_anchor(
+                path, data, manager.OWNER_FILE_MODE, "validator product lock"
+            )
+            is not True
+        ):
             raise ValueError("initial no-replace publication did not publish")
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -906,14 +981,590 @@ def validate_no_replace_publication_smoke(manager: Any) -> None:
             raise ValueError("no-replace publication mode mismatch")
         if path.read_bytes() != data:
             raise ValueError("no-replace publication bytes changed")
-        if manager.write_atomic_anchor(
-            path, b"{\"unexpected\":true}\n", manager.OWNER_FILE_MODE, "validator product lock"
-        ) is not False:
+        if (
+            manager.write_atomic_anchor(
+                path, data, manager.OWNER_FILE_MODE, "validator product lock"
+            )
+            is not False
+        ):
             raise ValueError("no-replace publication overwrote an existing final anchor")
         if path.read_bytes() != data:
             raise ValueError("no-replace EEXIST path changed the final anchor")
+        aliases = manager.validated_anchor_stage_aliases(path, data, "validator product lock")
+        if len(aliases) != 1:
+            raise ValueError("no-replace EEXIST path must retain one stage until final lock")
+        stale_alias = aliases[0]
+        os.utime(
+            stale_alias.path,
+            ns=(int(stale_alias.mtime_ns) + 1, int(stale_alias.mtime_ns) + 1),
+            follow_symlinks=False,
+        )
+        expect_manager_error(
+            manager,
+            lambda: manager.cleanup_validated_anchor_stage_alias(
+                stale_alias, data, "validator stale product stage"
+            ),
+            "changed before cleanup",
+        )
+        if not stale_alias.path.exists():
+            raise ValueError("stale stage cleanup removed an unvalidated alias")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            manager.fcntl.flock(descriptor, manager.fcntl.LOCK_EX)
+            manager.drain_anchor_stage_aliases(path, data, "validator product lock")
+            manager.require_product_lock_descriptor(descriptor, path)
+        finally:
+            with contextlib.suppress(OSError):
+                manager.fcntl.flock(descriptor, manager.fcntl.LOCK_UN)
+            os.close(descriptor)
         if any(item.name.startswith(f".{path.name}.nddev.tmp.") for item in tmp.iterdir()):
-            raise ValueError("no-replace EEXIST path left a publication temp file")
+            raise ValueError("no-replace final-lock drain left a publication temp file")
+
+
+def validate_local_stage_cleanup_smoke(manager: Any) -> None:
+    data = manager.expected_product_lock_binding_bytes()
+    original_rename = manager.rename_no_replace
+
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-local-stage-cleanup-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+        before = directory_exact_metadata(tmp)
+
+        def fail_publication(source: Path, destination: Path, label: str) -> bool:
+            raise manager.GrokBuildSetupError("injected local publication failure")
+
+        manager.rename_no_replace = fail_publication
+        try:
+            expect_manager_error(
+                manager,
+                lambda: manager.write_atomic_anchor(
+                    path, data, manager.OWNER_FILE_MODE, "validator product lock"
+                ),
+                "injected local publication failure",
+            )
+        finally:
+            manager.rename_no_replace = original_rename
+        if directory_exact_metadata(tmp) != before:
+            raise ValueError("local stage cleanup did not restore parent metadata")
+        if path.exists() or path.is_symlink() or anchor_stage_entries(manager, path):
+            raise ValueError("local stage cleanup left pre-final residue")
+
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-local-stage-tamper-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+
+        def tamper_then_fail(source: Path, destination: Path, label: str) -> bool:
+            info = source.lstat()
+            os.utime(
+                source,
+                ns=(int(info.st_atime_ns), int(info.st_mtime_ns) + 1),
+                follow_symlinks=False,
+            )
+            raise manager.GrokBuildSetupError("injected tampered publication failure")
+
+        manager.rename_no_replace = tamper_then_fail
+        try:
+            expect_manager_error(
+                manager,
+                lambda: manager.write_atomic_anchor(
+                    path, data, manager.OWNER_FILE_MODE, "validator product lock"
+                ),
+                "changed before cleanup",
+            )
+        finally:
+            manager.rename_no_replace = original_rename
+        stages = anchor_stage_entries(manager, path)
+        if len(stages) != 1:
+            raise ValueError("tampered stage was not preserved for fail-closed inspection")
+        if path.exists() or path.is_symlink():
+            raise ValueError("tampered pre-final stage unexpectedly published a final anchor")
+
+
+def validate_eexist_winner_stage_smokes(manager: Any) -> None:
+    data = manager.expected_product_lock_binding_bytes()
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-valid-eexist-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+        if (
+            manager.write_atomic_anchor(
+                path, data, manager.OWNER_FILE_MODE, "validator product lock"
+            )
+            is not True
+        ):
+            raise ValueError("valid-EEXIST setup did not publish an initial final")
+        final_before = snapshot_path(path)
+        if (
+            manager.write_atomic_anchor(
+                path, data, manager.OWNER_FILE_MODE, "validator product lock"
+            )
+            is not False
+        ):
+            raise ValueError("valid-EEXIST path did not report an existing winner")
+        if snapshot_path(path) != final_before:
+            raise ValueError("valid-EEXIST path changed the winner final anchor")
+        aliases = manager.validated_anchor_stage_aliases(path, data, "validator product lock")
+        if len(aliases) != 1:
+            raise ValueError("valid-EEXIST path did not preserve one own stage")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            manager.fcntl.flock(descriptor, manager.fcntl.LOCK_EX)
+            manager.drain_anchor_stage_aliases(path, data, "validator product lock")
+            manager.require_product_lock_descriptor(descriptor, path)
+        finally:
+            with contextlib.suppress(OSError):
+                manager.fcntl.flock(descriptor, manager.fcntl.LOCK_UN)
+            os.close(descriptor)
+        assert_no_anchor_stage_aliases(manager, path)
+
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-malformed-eexist-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+        path.write_bytes(b"{malformed winner}\n")
+        path.chmod(manager.OWNER_FILE_MODE)
+        before_parent = directory_exact_metadata(tmp)
+        before_final = snapshot_path(path)
+        expect_manager_error(
+            manager,
+            lambda: manager.write_atomic_anchor(
+                path, data, manager.OWNER_FILE_MODE, "validator product lock"
+            ),
+            "existing final anchor is invalid",
+        )
+        if directory_exact_metadata(tmp) != before_parent:
+            raise ValueError("malformed-EEXIST cleanup did not restore parent metadata")
+        if snapshot_path(path) != before_final:
+            raise ValueError("malformed-EEXIST cleanup changed the winner final")
+        if anchor_stage_entries(manager, path):
+            raise ValueError("malformed-EEXIST cleanup left the original stage")
+
+
+def validate_bounded_stage_promotion_smoke(manager: Any) -> None:
+    data = manager.expected_product_lock_binding_bytes()
+    for count in range(2, manager.ANCHOR_STAGE_MAX_ALIASES + 1):
+        with tempfile.TemporaryDirectory(
+            prefix=f"nddev-grok-build-stage-promotion-{count}-"
+        ) as tmp_raw:
+            product_root = Path(tmp_raw)
+            product_root.chmod(manager.OWNER_DIRECTORY_MODE)
+            path = manager.product_anchor_path(product_root)
+            for nonce in reversed(range(1, count + 1)):
+                create_anchor_stage_alias(manager, path, data, pid=12345, nonce=nonce)
+            aliases = manager.validated_anchor_stage_aliases(path, data, "validator product lock")
+            if len(aliases) != count:
+                raise ValueError("bounded stage setup did not produce the requested count")
+            expected = aliases[0]
+            if manager.publish_product_anchor_if_missing(product_root) is not True:
+                raise ValueError("bounded stage promotion did not publish the final anchor")
+            final = path.lstat()
+            if (final.st_dev, final.st_ino) != (expected.dev, expected.ino):
+                raise ValueError("bounded stage promotion did not select the deterministic first")
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                manager.fcntl.flock(descriptor, manager.fcntl.LOCK_EX)
+                manager.drain_anchor_stage_aliases(path, data, "validator product lock")
+                manager.require_product_lock_descriptor(descriptor, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    manager.fcntl.flock(descriptor, manager.fcntl.LOCK_UN)
+                os.close(descriptor)
+            assert_no_anchor_stage_aliases(manager, path)
+
+
+def validate_no_replace_enoent_winner_smoke(manager: Any) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-enoent-winner-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+        data = manager.expected_product_lock_binding_bytes()
+        stage = create_anchor_stage_alias(manager, path, data)
+        aliases = manager.validated_anchor_stage_aliases(path, data, "validator product lock")
+        if len(aliases) != 1:
+            raise ValueError("ENOENT winner setup did not create one valid stage")
+        original_rename = manager.rename_no_replace
+
+        def publish_then_report_missing(source: Path, destination: Path, label: str) -> bool:
+            if source == stage and destination == path:
+                if original_rename(source, destination, label) is not True:
+                    raise ValueError("ENOENT winner setup did not publish the final anchor")
+                raise FileNotFoundError(2, "No such file or directory", str(source))
+            return original_rename(source, destination, label)
+
+        manager.rename_no_replace = publish_then_report_missing
+        try:
+            created = manager.publish_validated_anchor_stage(
+                path, aliases[0], data, "validator product lock"
+            )
+        finally:
+            manager.rename_no_replace = original_rename
+        if created is not False:
+            raise ValueError("ENOENT winner must report an observed existing final")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            manager.require_product_lock_descriptor(descriptor, path)
+        finally:
+            os.close(descriptor)
+        if stage.exists() or stage.is_symlink():
+            raise ValueError("ENOENT winner left the promoted stage path visible")
+
+
+def create_anchor_stage_alias(
+    manager: Any,
+    path: Path,
+    data: bytes,
+    *,
+    pid: int = 12345,
+    nonce: int = 67890,
+) -> Path:
+    path.parent.mkdir(mode=manager.OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    path.parent.chmod(manager.OWNER_DIRECTORY_MODE)
+    stage = path.with_name(f"{manager.anchor_stage_prefix(path)}{pid}.{nonce}")
+    stage.write_bytes(data)
+    stage.chmod(manager.OWNER_FILE_MODE)
+    return stage
+
+
+def assert_no_anchor_stage_aliases(manager: Any, path: Path) -> None:
+    if not path.parent.exists():
+        return
+    prefix = manager.anchor_stage_prefix(path)
+    aliases = sorted(item.name for item in path.parent.iterdir() if item.name.startswith(prefix))
+    if aliases:
+        raise ValueError(f"anchor stage aliases remain for {path.name}: {aliases}")
+
+
+def anchor_stage_entries(manager: Any, path: Path) -> list[Path]:
+    if not path.parent.exists():
+        return []
+    prefix = manager.anchor_stage_prefix(path)
+    return sorted(item for item in path.parent.iterdir() if item.name.startswith(prefix))
+
+
+def fork_kill_before_anchor_rename(manager: Any, callback: Any, label: str) -> dict[str, str]:
+    ready_read, ready_write = os.pipe()
+    block_read, block_write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(block_write)
+        try:
+            close_fds_except({ready_write, block_read})
+            original_rename = manager.rename_no_replace
+
+            def blocked_rename(source: Path, destination: Path, current_label: str) -> bool:
+                if current_label == label:
+                    send_child_result(
+                        ready_write,
+                        {
+                            "source": str(source),
+                            "destination": str(destination),
+                            "label": current_label,
+                        },
+                    )
+                    os.read(block_read, 1)
+                return original_rename(source, destination, current_label)
+
+            manager.rename_no_replace = blocked_rename
+            callback()
+            send_child_result(ready_write, {"error": "rename barrier was not reached"})
+        except BaseException as exc:
+            send_child_result(ready_write, {"error": repr(exc)})
+        finally:
+            os._exit(30)
+    os.close(ready_write)
+    os.close(block_read)
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 10.0)
+        if not ready:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+            raise ValueError(f"{label} rename barrier was not reached")
+        payload = read_child_result(ready_read, pid, wait=False)
+        if "error" in payload:
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+            raise ValueError(f"{label} child failed before barrier: {payload['error']}")
+        os.kill(pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+        if not os.WIFSIGNALED(status) or os.WTERMSIG(status) != signal.SIGKILL:
+            raise ValueError(f"{label} child was not killed by SIGKILL: {status}")
+        return {str(key): str(value) for key, value in payload.items()}
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(ready_read)
+        with contextlib.suppress(OSError):
+            os.close(block_write)
+
+
+def assert_read_only_error_unchanged(
+    manager: Any, root: Path, callback: Any, expected: str
+) -> None:
+    before = snapshot_tree(root)
+    expect_manager_error(manager, callback, expected)
+    after = snapshot_tree(root)
+    if after != before:
+        raise ValueError("read-only anchor recovery check mutated the bootstrap namespace")
+
+
+def assert_mutator_error_unchanged(manager: Any, root: Path, callback: Any, expected: str) -> None:
+    before = snapshot_tree(root)
+    expect_manager_error(manager, callback, expected)
+    after = snapshot_tree(root)
+    if after != before:
+        raise ValueError("failed anchor recovery check mutated the bootstrap namespace")
+
+
+def validate_anchor_stage_recovery_smokes(manager: Any) -> None:
+    setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
+    profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
+    system_root = manager.bootstrap_system_root()
+    product_root = manager.bootstrap_product_root_path(system_root)
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-anchor-recovery-") as tmp_raw:
+        tmp = Path(tmp_raw)
+
+        product_target = tmp / "product-recovery-home"
+
+        def publish_product_anchor() -> None:
+            handle = manager.acquire_product_lock(create=True, exclusive=True)
+            if handle is not None:
+                manager.release_product_lock(handle)
+
+        product_payload = fork_kill_before_anchor_rename(
+            manager, publish_product_anchor, "product lock"
+        )
+        product_stage = Path(product_payload["source"])
+        product_final = Path(product_payload["destination"])
+        if not product_stage.is_file() or product_final.exists() or product_final.is_symlink():
+            raise ValueError(
+                "product lock SIGKILL did not leave the expected pre-publication stage"
+            )
+        assert_read_only_error_unchanged(
+            manager,
+            product_root,
+            lambda: manager.status_payload(product_target),
+            "product lock namespace",
+        )
+        manager.write_setup(product_target, setup, profile)
+        if not product_final.is_file():
+            raise ValueError("product lock recovery did not publish the final anchor")
+        assert_no_anchor_stage_aliases(manager, product_final)
+
+        target = tmp / "target-recovery-home"
+        target.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+        target.chmod(manager.OWNER_DIRECTORY_MODE)
+
+        def publish_target_anchor() -> None:
+            descriptor = manager.acquire_bootstrap_lock(target)
+            manager.release_bootstrap_lock(descriptor)
+
+        target_payload = fork_kill_before_anchor_rename(
+            manager, publish_target_anchor, "target lock"
+        )
+        target_stage = Path(target_payload["source"])
+        target_final = Path(target_payload["destination"])
+        if not target_stage.is_file() or target_final.exists() or target_final.is_symlink():
+            raise ValueError("target lock SIGKILL did not leave the expected pre-publication stage")
+        assert_read_only_error_unchanged(
+            manager,
+            product_root,
+            lambda: manager.status_payload(target),
+            "pending publication",
+        )
+        manager.write_setup(target, setup, profile)
+        if not target_final.is_file():
+            raise ValueError("target lock recovery did not publish the final anchor")
+        assert_no_anchor_stage_aliases(manager, target_final)
+
+
+def validate_anchor_root_rollback_smokes(manager: Any) -> None:
+    original_root = manager.bootstrap_system_root
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-root-rollback-") as tmp_raw:
+        system_root = Path(tmp_raw) / "system-tmp"
+        system_root.mkdir(mode=0o700)
+        system_root.chmod(0o1777)
+
+        def resolver() -> Path:
+            return system_root
+
+        manager.bootstrap_system_root = resolver
+        try:
+            _validate_anchor_root_rollback_smokes(manager, system_root)
+        finally:
+            manager.bootstrap_system_root = original_root
+
+
+def _validate_anchor_root_rollback_smokes(manager: Any, system_root: Path) -> None:
+    product_root = manager.bootstrap_product_root_path(system_root)
+    before_system = directory_exact_metadata(system_root)
+    original_rename = manager.rename_no_replace
+
+    def fail_product_publication(source: Path, destination: Path, label: str) -> bool:
+        if label == "product lock":
+            raise manager.GrokBuildSetupError("injected product publication failure")
+        return original_rename(source, destination, label)
+
+    manager.rename_no_replace = fail_product_publication
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.acquire_product_lock(create=True, exclusive=True),
+            "injected product publication failure",
+        )
+    finally:
+        manager.rename_no_replace = original_rename
+    if product_root.exists() or product_root.is_symlink():
+        raise ValueError("product root rollback left a newly created root")
+    after_system = directory_exact_metadata(system_root)
+    if after_system != before_system:
+        raise ValueError("product root rollback changed system-root metadata")
+
+    handle = manager.acquire_product_lock(create=True, exclusive=True)
+    if handle is None:
+        raise ValueError("product lock was not created for target root rollback smoke")
+    manager.release_product_lock(handle)
+    before_product = directory_exact_metadata(product_root)
+    target_root = manager.target_lock_root_path(product_root)
+    target = system_root / "target-root-rollback-home"
+    target.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+    target.chmod(manager.OWNER_DIRECTORY_MODE)
+
+    def fail_target_publication(source: Path, destination: Path, label: str) -> bool:
+        if label == "target lock":
+            raise manager.GrokBuildSetupError("injected target publication failure")
+        return original_rename(source, destination, label)
+
+    manager.rename_no_replace = fail_target_publication
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.acquire_bootstrap_lock(target),
+            "injected target publication failure",
+        )
+    finally:
+        manager.rename_no_replace = original_rename
+    if target_root.exists() or target_root.is_symlink():
+        raise ValueError("target lock root rollback left a newly created root")
+    after_product = directory_exact_metadata(product_root)
+    if after_product != before_product:
+        raise ValueError("target lock root rollback changed product-root metadata")
+
+    target_root.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+    target_root.chmod(manager.OWNER_DIRECTORY_MODE)
+    manager.fsync_directory(product_root, "validator target lock root setup")
+    before_product_with_root = directory_exact_metadata(product_root)
+    before_target_root = directory_exact_metadata(target_root)
+    target_existing_root = system_root / "target-root-preexisting-home"
+    target_existing_root.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+    target_existing_root.chmod(manager.OWNER_DIRECTORY_MODE)
+    manager.rename_no_replace = fail_target_publication
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.acquire_bootstrap_lock(target_existing_root),
+            "injected target publication failure",
+        )
+    finally:
+        manager.rename_no_replace = original_rename
+    if not target_root.is_dir():
+        raise ValueError("preexisting target lock root rollback removed the root")
+    if directory_exact_metadata(target_root) != before_target_root:
+        raise ValueError("preexisting target lock root rollback changed target-root metadata")
+    if directory_exact_metadata(product_root) != before_product_with_root:
+        raise ValueError("preexisting target lock root rollback changed product-root metadata")
+
+
+def validate_anchor_stage_adversarial_smokes(manager: Any) -> None:
+    system_root = manager.bootstrap_system_root()
+    product_root = manager.bootstrap_product_root_path(system_root)
+    product_final = manager.product_anchor_path(product_root)
+    product_data = manager.expected_product_lock_binding_bytes()
+
+    def reset_product_root() -> None:
+        if product_root.exists() and not product_root.is_symlink():
+            shutil.rmtree(product_root)
+        product_root.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+        product_root.chmod(manager.OWNER_DIRECTORY_MODE)
+
+    def acquire_product_once() -> None:
+        handle = manager.acquire_product_lock(create=True, exclusive=True)
+        if handle is not None:
+            manager.release_product_lock(handle)
+
+    reset_product_root()
+    (product_root / "unknown").write_text("x", encoding="utf-8")
+    assert_mutator_error_unchanged(manager, product_root, acquire_product_once, "unknown entries")
+
+    reset_product_root()
+    malformed = product_root / f"{manager.anchor_stage_prefix(product_final)}bad"
+    malformed.write_bytes(product_data)
+    malformed.chmod(manager.OWNER_FILE_MODE)
+    assert_mutator_error_unchanged(
+        manager, product_root, acquire_product_once, "malformed publication stage"
+    )
+
+    reset_product_root()
+    create_anchor_stage_alias(manager, product_final, b"{partial")
+    assert_mutator_error_unchanged(
+        manager, product_root, acquire_product_once, "staged binding postcondition"
+    )
+
+    reset_product_root()
+    create_anchor_stage_alias(manager, product_final, b"[]\n")
+    assert_mutator_error_unchanged(
+        manager, product_root, acquire_product_once, "staged binding postcondition"
+    )
+
+    reset_product_root()
+    wrong_mode = create_anchor_stage_alias(manager, product_final, product_data)
+    wrong_mode.chmod(0o644)
+    assert_mutator_error_unchanged(manager, product_root, acquire_product_once, "mode 0600")
+
+    reset_product_root()
+    symlink_stage = product_root / f"{manager.anchor_stage_prefix(product_final)}12345.67890"
+    symlink_stage.symlink_to("elsewhere")
+    assert_mutator_error_unchanged(manager, product_root, acquire_product_once, "symlink")
+
+    reset_product_root()
+    hardlink_one = create_anchor_stage_alias(manager, product_final, product_data, nonce=1)
+    hardlink_two = product_root / f"{manager.anchor_stage_prefix(product_final)}12345.2"
+    os.link(hardlink_one, hardlink_two)
+    assert_mutator_error_unchanged(manager, product_root, acquire_product_once, "hardlink")
+
+    reset_product_root()
+    for index in range(manager.ANCHOR_STAGE_MAX_ALIASES + 1):
+        create_anchor_stage_alias(manager, product_final, product_data, nonce=index + 1)
+    assert_mutator_error_unchanged(
+        manager, product_root, acquire_product_once, "excessive publication stages"
+    )
+
+    reset_product_root()
+    handle = manager.acquire_product_lock(create=True, exclusive=True)
+    if handle is None:
+        raise ValueError("product lock was not created for target adversarial smoke")
+    manager.release_product_lock(handle)
+    target = product_root.parent / "wrong-target-home"
+    identity = manager.bootstrap_target_identity(target)
+    target_final = manager.bootstrap_lock_path_for_root(product_root, identity)
+    wrong_identity = manager.bootstrap_target_identity(product_root.parent / "other-home")
+    wrong_data = manager.expected_bootstrap_lock_binding_bytes(wrong_identity)
+    create_anchor_stage_alias(manager, target_final, wrong_data)
+    assert_read_only_error_unchanged(
+        manager,
+        product_root,
+        lambda: manager.status_payload(target),
+        "pending publication",
+    )
+    assert_mutator_error_unchanged(
+        manager,
+        product_root,
+        lambda: manager.acquire_bootstrap_lock(target),
+        "staged binding postcondition",
+    )
 
 
 def validate_fetch_error_smokes(manager: Any) -> None:
@@ -1004,6 +1655,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
             raise ValueError("status launchable must be false without current software")
 
         validate_bootstrap_handover_smoke(manager, target)
+        validate_bootstrap_different_target_handoff_smoke(manager, tmp)
         validate_bootstrap_binding_smokes(manager, target)
         validate_restore_backup_smokes(manager, target, setup)
 
@@ -1021,15 +1673,36 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 lambda args=child_args: manager.launch(target, list(args)),
                 "managed-state mutation",
             )
+        for child_args in (
+            ["--cwd=/x"],
+            ["--permission-mode", "full-auto"],
+            ["--permission-mode=full-auto"],
+        ):
+            expect_manager_error(
+                manager,
+                lambda args=child_args: manager.launch(target, list(args)),
+                "override target-owned Grok Build scope",
+            )
+        workspace_file = tmp / "workspace-file"
+        workspace_file.write_text("not a directory\n", encoding="utf-8")
+        workspace_real = tmp / "workspace-real"
+        workspace_real.mkdir(mode=0o700)
+        workspace_real.chmod(0o700)
+        workspace_link = tmp / "workspace-link"
+        workspace_link.symlink_to(workspace_real)
+        for workspace, expected in (
+            (tmp / "missing-workspace", "launch workspace is missing"),
+            (workspace_file, "launch workspace must be a directory"),
+            (workspace_link, "launch workspace must not be a symlink"),
+        ):
+            expect_manager_error(
+                manager,
+                lambda item=workspace: manager.launch(target, ["doctor"], workspace=str(item)),
+                expected,
+            )
 
-        original = (
-            b"#!/bin/sh\n"
-            b"printf 'original\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
-        )
-        replacement = (
-            b"#!/bin/sh\n"
-            b"printf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
-        )
+        original = b"#!/bin/sh\nprintf 'original\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
+        replacement = b"#!/bin/sh\nprintf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
         validate_runtime_write_smoke(manager, target)
         original_digest = install_stub_software(manager, target, original)
         original_popen = manager.subprocess.Popen
@@ -1076,9 +1749,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 safe_profile = manager.load_profile("safe")
                 fork_expect_manager_error(
                     manager,
-                    lambda: manager.write_setup(
-                        target, setup, safe_profile, require_existing=True
-                    ),
+                    lambda: manager.write_setup(target, setup, safe_profile, require_existing=True),
                     "target is locked",
                 )
                 fork_expect_manager_error(
@@ -1093,7 +1764,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                     raise ValueError("launch child cwd was not bound to the workspace")
                 if launch_image.parent.resolve() != manager.launch_image_dir(target).resolve():
                     raise ValueError("launch did not use a private target-internal launch image")
-                if stat.S_IMODE(launch_image.parent.lstat().st_mode) != manager.LOCK_PARENT_HELD_MODE:
+                if (
+                    stat.S_IMODE(launch_image.parent.lstat().st_mode)
+                    != manager.LOCK_PARENT_HELD_MODE
+                ):
                     raise ValueError("launch image directory must be non-writable during launch")
                 if stat.S_IMODE(launch_image.lstat().st_mode) != manager.IMMUTABLE_EXEC_MODE:
                     raise ValueError("launch image must use immutable executable mode")
@@ -1122,7 +1796,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 raise ValueError("stubbed launch did not return success")
         finally:
             manager.subprocess.Popen = original_popen
-        if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+        if (
+            stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
+            != manager.OWNER_DIRECTORY_MODE
+        ):
             raise ValueError("launch lock parent was not restored")
         if manager.launch_image_dir(target).exists():
             raise ValueError("launch image directory was not removed")
@@ -1204,9 +1881,13 @@ def validate_builder_toolkit(build_version: str) -> None:
         if not stat.S_ISREG(info.st_mode):
             raise ValueError(f"builder payload is not a regular file: {path.relative_to(ROOT)}")
         if stat.S_IMODE(info.st_mode) & 0o111:
-            raise ValueError(f"builder payload must not ship executable files: {path.relative_to(ROOT)}")
+            raise ValueError(
+                f"builder payload must not ship executable files: {path.relative_to(ROOT)}"
+            )
         if path.suffix.lower() in {".bin", ".exe", ".dmg", ".pkg", ".deb", ".rpm", ".zip", ".tgz"}:
-            raise ValueError(f"builder payload must not ship binary/runtime archives: {path.relative_to(ROOT)}")
+            raise ValueError(
+                f"builder payload must not ship binary/runtime archives: {path.relative_to(ROOT)}"
+            )
 
     for skill in BUILDER_SKILLS:
         skill_path = plugin_root / "skills" / skill / "SKILL.md"
@@ -1285,7 +1966,9 @@ def validate_release_workflow(manifest: dict[str, Any], contract: dict[str, Any]
     required_runtime = contract_runtime_required_paths(manifest, contract)
     missing_runtime = required_runtime - runtime_paths
     if missing_runtime:
-        raise ValueError(f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}")
+        raise ValueError(
+            f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}"
+        )
     validate_claude_bridge(archive_paths, runtime_paths)
 
 
@@ -1294,10 +1977,7 @@ def validate_skill_local_references(plugin_root: Path, skill_path: Path, text: s
     for reference in re.findall(r"`([^`]+)`", text):
         if not reference.endswith(".md"):
             continue
-        if not (
-            reference.startswith("../")
-            or reference.startswith("references/")
-        ):
+        if not (reference.startswith("../") or reference.startswith("references/")):
             continue
         candidate = (skill_path.parent / reference).resolve()
         if candidate != plugin_real and plugin_real not in candidate.parents:
@@ -1334,9 +2014,15 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("contract must not expose skeleton status")
     if manifest.get("setup_ids") != ids or contract["setup_system"]["setup_ids"] != ids:
         raise ValueError("setup ids are not synchronized")
-    if manifest.get("profile_ids") != profiles or contract["setup_system"]["profile_ids"] != profiles:
+    if (
+        manifest.get("profile_ids") != profiles
+        or contract["setup_system"]["profile_ids"] != profiles
+    ):
         raise ValueError("profile ids are not synchronized")
-    if manifest.get("default_setup") != "nddev-builder" or manifest.get("default_profile") != "full-auto":
+    if (
+        manifest.get("default_setup") != "nddev-builder"
+        or manifest.get("default_profile") != "full-auto"
+    ):
         raise ValueError("manifest default setup/profile mismatch")
     backup_policy = manifest.get("backup_policy")
     if not isinstance(backup_policy, dict):
@@ -1390,6 +2076,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest external lock primitives mismatch")
     if transaction.get("external_lock_empty_partial_malformed_fail_closed") is not True:
         raise ValueError("manifest external lock must fail closed on incomplete anchors")
+    if transaction.get("external_lock_stage_recovery_mutation_only") is not True:
+        raise ValueError("manifest external lock stage recovery must be mutation-only")
+    if transaction.get("external_lock_stage_recovery_max_aliases") != 8:
+        raise ValueError("manifest external lock stage recovery alias bound mismatch")
+    if transaction.get("external_lock_namespace_max_entries") != 4096:
+        raise ValueError("manifest external lock namespace entry bound mismatch")
     if transaction.get("external_read_only_no_create") is not True:
         raise ValueError("manifest read-only commands must not create external anchors")
     if transaction.get("external_read_only_cold_namespace_empty_required") is not True:
@@ -1446,9 +2138,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest launch image file mode mismatch")
     if transaction.get("runtime_home_tmp_xdg_writable_while_locked") is not True:
         raise ValueError("manifest must keep runtime HOME/TMP/XDG writable")
-    if "same user" not in str(
-        transaction.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if "same user" not in str(transaction.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("manifest must document the same-user mutation boundary")
     if "sandbox off" not in str(
         transaction.get("same_uid_malicious_mutation_boundary", "")
@@ -1474,6 +2166,8 @@ def main(argv: list[str] | None = None) -> int:
         "external_bootstrap_lock_json_binding",
         "external_lock_atomic_no_replace",
         "external_lock_empty_partial_malformed_fail_closed",
+        "external_lock_stage_recovery_mutation_only",
+        "external_lock_stage_aliases_fail_closed_on_read_only",
         "external_read_only_no_create",
         "external_read_only_cold_namespace_empty_required",
         "external_read_only_cold_namespace_identity_retry",
@@ -1501,13 +2195,13 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if safety.get(key) is not True:
             raise ValueError(f"contract safety must set {key}=true")
-    if "same user" not in str(
-        safety.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if "same user" not in str(safety.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("contract must document the same-user mutation boundary")
-    if "sandbox off" not in str(
-        safety.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if "sandbox off" not in str(safety.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("contract must document the sandbox-off same-user boundary")
     if build.get("grok_build_tested") != baseline["release"]["npm_version"]:
         raise ValueError("tested Grok Build version differs from baseline release")
@@ -1622,8 +2316,15 @@ def main(argv: list[str] | None = None) -> int:
     validate_builder_toolkit(version)
     with isolated_bootstrap_root(manager):
         validate_no_replace_publication_smoke(manager)
+        validate_local_stage_cleanup_smoke(manager)
+        validate_eexist_winner_stage_smokes(manager)
+        validate_bounded_stage_promotion_smoke(manager)
+        validate_no_replace_enoent_winner_smoke(manager)
+        validate_anchor_root_rollback_smokes(manager)
+        validate_anchor_stage_recovery_smokes(manager)
         validate_adversarial_smokes(manager)
         validate_fetch_error_smokes(manager)
+        validate_anchor_stage_adversarial_smokes(manager)
     validate_workflows()
     validate_release_workflow(manifest, contract)
     print("validate_public_contracts.py: PASS")

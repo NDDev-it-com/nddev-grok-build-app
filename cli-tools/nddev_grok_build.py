@@ -64,6 +64,9 @@ MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 READ_LIFECYCLE_MAX_ATTEMPTS = 4
+ANCHOR_STAGE_MAX_ALIASES = 8
+ANCHOR_STAGE_NUMBER_MAX_DIGITS = 20
+ANCHOR_NAMESPACE_MAX_ENTRIES = 4096
 AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
 RENAME_EXCL_DARWIN = 0x00000004
 RENAME_NOREPLACE_LINUX = 1
@@ -77,9 +80,7 @@ GROK_COMMAND = "grok"
 GROK_VERSION = "0.2.112"
 GROK_CHANNEL = "stable"
 GROK_NPM_PACKAGE = "@xai-official/grok"
-GROK_NPM_INTEGRITY = (
-    "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
-)
+GROK_NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
 GROK_NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
@@ -214,6 +215,7 @@ class ProductLockHandle(NamedTuple):
     product_root: Path
     system_root: Path
     mode: int
+    product_root_snapshot: DirectoryMetadata | None
 
 
 class ExternalTargetLockHandle(NamedTuple):
@@ -232,6 +234,38 @@ class ColdProductNamespaceSnapshot(NamedTuple):
     nlink: int | None
     size: int | None
     mtime_ns: int | None
+
+
+class DirectoryMetadata(NamedTuple):
+    dev: int
+    ino: int
+    mode: int
+    uid: int
+    gid: int
+    nlink: int
+    size: int
+    atime_ns: int
+    mtime_ns: int
+
+
+class AnchorStageAlias(NamedTuple):
+    path: Path
+    dev: int
+    ino: int
+    mode: int
+    uid: int
+    gid: int
+    nlink: int
+    size: int
+    mtime_ns: int
+
+
+class BootstrapProductRootSetup(NamedTuple):
+    system_root: Path
+    product_root: Path
+    created: bool
+    system_snapshot: DirectoryMetadata
+    product_snapshot: DirectoryMetadata | None
 
 
 def fail(message: str) -> NoReturn:
@@ -419,7 +453,10 @@ def bootstrap_lock_digest(identity: str) -> str:
 
 
 def bootstrap_lock_path_for_root(product_root: Path, identity: str) -> Path:
-    return target_lock_root_path(product_root) / f"{bootstrap_lock_digest(identity)}{TARGET_LOCK_SUFFIX}"
+    return (
+        target_lock_root_path(product_root)
+        / f"{bootstrap_lock_digest(identity)}{TARGET_LOCK_SUFFIX}"
+    )
 
 
 def bootstrap_lock_path(identity: str) -> Path:
@@ -552,6 +589,98 @@ def restore_directory_mtime(path: Path, mtime_ns: int, label: str) -> None:
         fsync_directory(path, f"{label} mtime restore")
 
 
+def directory_metadata(path: Path, label: str) -> DirectoryMetadata:
+    info = require_private_directory(path, label)
+    return DirectoryMetadata(
+        dev=int(info.st_dev),
+        ino=int(info.st_ino),
+        mode=stat.S_IMODE(info.st_mode),
+        uid=int(info.st_uid),
+        gid=int(info.st_gid),
+        nlink=int(info.st_nlink),
+        size=int(info.st_size),
+        atime_ns=int(info.st_atime_ns),
+        mtime_ns=int(info.st_mtime_ns),
+    )
+
+
+def observed_directory_metadata(path: Path, label: str) -> DirectoryMetadata:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"{label} cannot be inspected: {exc}")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    return DirectoryMetadata(
+        dev=int(info.st_dev),
+        ino=int(info.st_ino),
+        mode=stat.S_IMODE(info.st_mode),
+        uid=int(info.st_uid),
+        gid=int(info.st_gid),
+        nlink=int(info.st_nlink),
+        size=int(info.st_size),
+        atime_ns=int(info.st_atime_ns),
+        mtime_ns=int(info.st_mtime_ns),
+    )
+
+
+def restore_directory_metadata(
+    path: Path, snapshot: DirectoryMetadata, label: str, *, verify_topology: bool = True
+) -> None:
+    current = require_private_directory(path, label)
+    if (current.st_dev, current.st_ino) != (snapshot.dev, snapshot.ino):
+        fail(f"{label} identity changed during recovery")
+    if (current.st_uid, current.st_gid) != (snapshot.uid, snapshot.gid):
+        fail(f"{label} owner changed during recovery")
+    if verify_topology and (current.st_nlink, current.st_size) != (
+        snapshot.nlink,
+        snapshot.size,
+    ):
+        fail(f"{label} topology changed during recovery")
+    if stat.S_IMODE(current.st_mode) != snapshot.mode:
+        path.chmod(snapshot.mode)
+    os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns), follow_symlinks=False)
+    fsync_directory(path, f"{label} metadata restore")
+    final = require_private_directory(path, label)
+    if (final.st_dev, final.st_ino) != (snapshot.dev, snapshot.ino):
+        fail(f"{label} identity changed after recovery")
+    if (final.st_uid, final.st_gid) != (snapshot.uid, snapshot.gid):
+        fail(f"{label} owner changed after recovery")
+    if verify_topology and (final.st_nlink, final.st_size) != (snapshot.nlink, snapshot.size):
+        fail(f"{label} topology changed after recovery")
+    if stat.S_IMODE(final.st_mode) != snapshot.mode:
+        fail(f"{label} mode changed after recovery")
+    if int(final.st_atime_ns) != snapshot.atime_ns or int(final.st_mtime_ns) != snapshot.mtime_ns:
+        fail(f"{label} timestamp changed after recovery")
+
+
+def restore_observed_directory_metadata(
+    path: Path, snapshot: DirectoryMetadata, label: str
+) -> None:
+    current = observed_directory_metadata(path, label)
+    if (current.dev, current.ino) != (snapshot.dev, snapshot.ino):
+        fail(f"{label} identity changed during recovery")
+    if (current.uid, current.gid) != (snapshot.uid, snapshot.gid):
+        fail(f"{label} owner changed during recovery")
+    if (current.nlink, current.size) != (snapshot.nlink, snapshot.size):
+        fail(f"{label} topology changed during recovery")
+    if current.mode != snapshot.mode:
+        fail(f"{label} mode changed during recovery")
+    os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns), follow_symlinks=False)
+    fsync_directory(path, f"{label} metadata restore")
+    final = observed_directory_metadata(path, label)
+    if (final.dev, final.ino) != (snapshot.dev, snapshot.ino):
+        fail(f"{label} identity changed after recovery")
+    if (final.uid, final.gid) != (snapshot.uid, snapshot.gid):
+        fail(f"{label} owner changed after recovery")
+    if (final.nlink, final.size) != (snapshot.nlink, snapshot.size):
+        fail(f"{label} topology changed after recovery")
+    if final.mode != snapshot.mode:
+        fail(f"{label} mode changed after recovery")
+    if final.atime_ns != snapshot.atime_ns or final.mtime_ns != snapshot.mtime_ns:
+        fail(f"{label} timestamp changed after recovery")
+
+
 def require_anchor_file_stat(info: os.stat_result, label: str) -> None:
     if not stat.S_ISREG(info.st_mode):
         fail(f"{label} must be a regular file")
@@ -566,11 +695,35 @@ def require_anchor_file_stat(info: os.stat_result, label: str) -> None:
         fail(f"{label} binding is too large")
 
 
-def verify_staged_lock_file(path: Path, data: bytes, label: str) -> None:
+def anchor_stage_alias_from_stat(path: Path, info: os.stat_result) -> AnchorStageAlias:
+    return AnchorStageAlias(
+        path=path,
+        dev=int(info.st_dev),
+        ino=int(info.st_ino),
+        mode=stat.S_IMODE(info.st_mode),
+        uid=int(info.st_uid),
+        gid=int(info.st_gid),
+        nlink=int(info.st_nlink),
+        size=int(info.st_size),
+        mtime_ns=int(info.st_mtime_ns),
+    )
+
+
+def require_anchor_stage_alias_matches(
+    info: os.stat_result, expected: AnchorStageAlias, label: str
+) -> None:
+    require_anchor_file_stat(info, label)
+    actual = anchor_stage_alias_from_stat(expected.path, info)
+    if actual != expected:
+        fail(f"{label} changed before cleanup")
+
+
+def validated_staged_lock_file(path: Path, data: bytes, label: str) -> AnchorStageAlias:
     before = stat_existing(path, label)
     if before is None:
         fail(f"{label} disappeared while staging")
     require_anchor_file_stat(before, label)
+    expected = anchor_stage_alias_from_stat(path, before)
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -582,9 +735,7 @@ def verify_staged_lock_file(path: Path, data: bytes, label: str) -> None:
         fail(f"{label} could not be opened safely: {exc}")
     try:
         opened = os.fstat(descriptor)
-        require_anchor_file_stat(opened, label)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            fail(f"{label} changed while opening")
+        require_anchor_stage_alias_matches(opened, expected, label)
         os.lseek(descriptor, 0, os.SEEK_SET)
         payload = os.read(descriptor, METADATA_MAX_BYTES + 1)
         if payload != data:
@@ -592,11 +743,17 @@ def verify_staged_lock_file(path: Path, data: bytes, label: str) -> None:
     finally:
         os.close(descriptor)
     current = stat_existing(path, label)
-    if current is None or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+    if current is None:
         fail(f"{label} changed after staging")
+    require_anchor_stage_alias_matches(current, expected, label)
+    return expected
 
 
-def write_lock_stage_file(path: Path, data: bytes, label: str) -> None:
+def verify_staged_lock_file(path: Path, data: bytes, label: str) -> None:
+    validated_staged_lock_file(path, data, label)
+
+
+def write_lock_stage_file(path: Path, data: bytes, label: str) -> AnchorStageAlias:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -618,7 +775,7 @@ def write_lock_stage_file(path: Path, data: bytes, label: str) -> None:
             path.unlink()
         raise
     os.close(descriptor)
-    verify_staged_lock_file(path, data, label)
+    return validated_staged_lock_file(path, data, label)
 
 
 def cleanup_lock_stage_file(path: Path, label: str) -> None:
@@ -631,6 +788,139 @@ def cleanup_lock_stage_file(path: Path, label: str) -> None:
     except OSError as exc:
         fail(f"{label} cleanup failed: {exc}")
     fsync_directory(path.parent, f"{label} cleanup")
+
+
+def cleanup_validated_anchor_stage_alias(alias: AnchorStageAlias, data: bytes, label: str) -> None:
+    revalidated = validated_staged_lock_file(alias.path, data, label)
+    if revalidated != alias:
+        fail(f"{label} changed before cleanup")
+    try:
+        alias.path.unlink()
+    except OSError as exc:
+        fail(f"{label} cleanup failed: {exc}")
+    fsync_directory(alias.path.parent, f"{label} cleanup")
+
+
+def bounded_directory_entries(path: Path, label: str) -> list[Path]:
+    entries: list[Path] = []
+    try:
+        iterator = path.iterdir()
+        for entry in iterator:
+            if len(entries) >= ANCHOR_NAMESPACE_MAX_ENTRIES:
+                fail(f"{label} contains too many entries")
+            entries.append(entry)
+    except FileNotFoundError:
+        raise ReadLifecycleRetry
+    except OSError as exc:
+        fail(f"{label} cannot be inspected: {exc}")
+    return sorted(entries, key=lambda item: item.name)
+
+
+def anchor_stage_prefix(path: Path) -> str:
+    return f".{path.name}.nddev.tmp."
+
+
+def anchor_stage_name_is_exact(path: Path, name: str) -> bool:
+    prefix = anchor_stage_prefix(path)
+    if not name.startswith(prefix):
+        return False
+    suffix = name[len(prefix) :]
+    parts = suffix.split(".")
+    if len(parts) != 2:
+        return False
+    for part in parts:
+        if not part.isdecimal():
+            return False
+        if not (1 <= len(part) <= ANCHOR_STAGE_NUMBER_MAX_DIGITS):
+            return False
+    return True
+
+
+def validated_anchor_stage_aliases(path: Path, data: bytes, label: str) -> list[AnchorStageAlias]:
+    aliases: list[Path] = []
+    prefix = anchor_stage_prefix(path)
+    for candidate in bounded_directory_entries(path.parent, f"{label} parent"):
+        if not candidate.name.startswith(prefix):
+            continue
+        if not anchor_stage_name_is_exact(path, candidate.name):
+            fail(f"{label} has malformed publication stage")
+        aliases.append(candidate)
+    if len(aliases) > ANCHOR_STAGE_MAX_ALIASES:
+        fail(f"{label} has excessive publication stages")
+    return [validated_staged_lock_file(alias, data, f"{label} staged binding") for alias in aliases]
+
+
+def final_anchor_matches(path: Path, data: bytes, label: str) -> bool:
+    try:
+        validated_staged_lock_file(path, data, label)
+    except GrokBuildSetupError:
+        return False
+    return True
+
+
+def publish_validated_anchor_stage(
+    path: Path, stage: AnchorStageAlias, data: bytes, label: str
+) -> bool:
+    try:
+        published = rename_no_replace(stage.path, path, label)
+    except FileNotFoundError:
+        if final_anchor_matches(path, data, label):
+            return False
+        fail(f"{label} publication stage disappeared without a valid final anchor")
+    if not published:
+        return False
+    fsync_directory(path.parent, f"{label} recovered publication")
+    return True
+
+
+def drain_anchor_stage_aliases(path: Path, data: bytes, label: str) -> None:
+    parent_snapshot = directory_metadata(path.parent, f"{label} parent")
+    aliases = validated_anchor_stage_aliases(path, data, label)
+    for alias in aliases:
+        cleanup_validated_anchor_stage_alias(alias, data, f"{label} staged binding")
+    if aliases:
+        restore_directory_metadata(
+            path.parent, parent_snapshot, f"{label} parent", verify_topology=False
+        )
+
+
+def fail_if_anchor_stage_aliases_exist(path: Path, data: bytes, label: str) -> None:
+    aliases = validated_anchor_stage_aliases(path, data, label)
+    if aliases:
+        fail(f"{label} has pending publication stages")
+
+
+def target_lock_final_name_is_valid(name: str) -> bool:
+    return (
+        name.endswith(TARGET_LOCK_SUFFIX)
+        and SHA256_PATTERN.fullmatch(name[: -len(TARGET_LOCK_SUFFIX)]) is not None
+    )
+
+
+def target_lock_stage_name_is_valid(name: str) -> bool:
+    if not name.startswith(".") or ".nddev.tmp." not in name:
+        return False
+    final_name, suffix = name[1:].split(".nddev.tmp.", 1)
+    if not target_lock_final_name_is_valid(final_name):
+        return False
+    parts = suffix.split(".")
+    if len(parts) != 2:
+        return False
+    return all(
+        part.isdecimal() and 1 <= len(part) <= ANCHOR_STAGE_NUMBER_MAX_DIGITS for part in parts
+    )
+
+
+def validate_target_lock_root_entries(root: Path, *, allow_stage_aliases: bool) -> None:
+    for entry in bounded_directory_entries(root, "target lock root"):
+        if target_lock_final_name_is_valid(entry.name):
+            validate_target_lock_entry(entry)
+            continue
+        if target_lock_stage_name_is_valid(entry.name):
+            if allow_stage_aliases:
+                continue
+            fail("target lock root contains pending publication stages")
+        fail(f"target lock root contains unknown entry: {entry.name}")
 
 
 def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
@@ -678,6 +968,8 @@ def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
     error = ctypes.get_errno()
     if error == errno.EEXIST:
         return False
+    if error == errno.ENOENT:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(error), str(source))
     if error in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
         fail(f"{label} no-replace publication primitive is unavailable")
     fail(f"{label} no-replace publication failed: {os.strerror(error)}")
@@ -685,16 +977,18 @@ def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
 
 def write_atomic_anchor(path: Path, data: bytes, mode: int, label: str) -> bool:
     parent = path.parent
-    parent_info = require_private_directory(parent, f"{label} parent")
-    parent_mtime_ns = int(parent_info.st_mtime_ns)
+    parent_snapshot = directory_metadata(parent, f"{label} parent")
     stage = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    stage_alias: AnchorStageAlias | None = None
     published = False
     try:
-        write_lock_stage_file(stage, data, f"{label} staged binding")
+        stage_alias = write_lock_stage_file(stage, data, f"{label} staged binding")
         if not rename_no_replace(stage, path, label):
-            cleanup_lock_stage_file(stage, f"{label} staged binding")
-            restore_directory_mtime(parent, parent_mtime_ns, f"{label} parent")
-            return False
+            if final_anchor_matches(path, data, label):
+                return False
+            cleanup_validated_anchor_stage_alias(stage_alias, data, f"{label} staged binding")
+            restore_directory_metadata(parent, parent_snapshot, f"{label} parent")
+            fail(f"{label} existing final anchor is invalid")
         published = True
         fsync_directory(parent, f"{label} publication")
         return True
@@ -704,36 +998,81 @@ def write_atomic_anchor(path: Path, data: bytes, mode: int, label: str) -> bool:
             if current is not None and stat.S_ISREG(current.st_mode):
                 published = True
         if stage.exists() or stage.is_symlink():
-            with contextlib.suppress(BaseException):
-                cleanup_lock_stage_file(stage, f"{label} staged binding")
+            if stage_alias is None:
+                fail(f"{label} staged binding lacks cleanup authority")
+            cleanup_validated_anchor_stage_alias(stage_alias, data, f"{label} staged binding")
         if not published:
-            restore_directory_mtime(parent, parent_mtime_ns, f"{label} parent")
+            restore_directory_metadata(parent, parent_snapshot, f"{label} parent")
         raise
 
 
-def ensure_bootstrap_product_root() -> Path:
+def ensure_bootstrap_product_root_for_publication() -> BootstrapProductRootSetup:
     system_root = bootstrap_system_root()
     product_root = bootstrap_product_root_path(system_root)
+    system_snapshot = observed_directory_metadata(system_root, "bootstrap system root")
     info = stat_existing(product_root, "product lock root")
+    created = False
     if info is None:
         try:
             product_root.mkdir(mode=OWNER_DIRECTORY_MODE)
-        except FileExistsError:
-            pass
-        else:
+            created = True
             product_root.chmod(OWNER_DIRECTORY_MODE)
             fsync_directory(system_root, "product lock root creation")
+        except FileExistsError:
+            pass
+        except BaseException:
+            if created:
+                entries = bounded_directory_entries(product_root, "product lock root rollback")
+                if entries:
+                    fail("product lock root rollback found unexpected entries")
+                try:
+                    product_root.rmdir()
+                except OSError as exc:
+                    fail(f"product lock root rollback failed: {exc}")
+                fsync_directory(system_root, "product lock root rollback")
+                restore_observed_directory_metadata(
+                    system_root, system_snapshot, "bootstrap system root"
+                )
+            raise
     require_private_directory(product_root, "product lock root")
-    return product_root
+    product_snapshot = None if created else directory_metadata(product_root, "product lock root")
+    return BootstrapProductRootSetup(
+        system_root=system_root,
+        product_root=product_root,
+        created=created,
+        system_snapshot=system_snapshot,
+        product_snapshot=product_snapshot,
+    )
+
+
+def ensure_bootstrap_product_root() -> Path:
+    return ensure_bootstrap_product_root_for_publication().product_root
+
+
+def rollback_bootstrap_product_root_publication(
+    setup: BootstrapProductRootSetup, final_anchor: Path
+) -> None:
+    if final_anchor.exists() or final_anchor.is_symlink():
+        return
+    if setup.created:
+        entries = bounded_directory_entries(setup.product_root, "product lock root rollback")
+        if entries:
+            fail("product lock root rollback found unexpected entries")
+        try:
+            setup.product_root.rmdir()
+        except OSError as exc:
+            fail(f"product lock root rollback failed: {exc}")
+        fsync_directory(setup.system_root, "product lock root rollback")
+        restore_observed_directory_metadata(
+            setup.system_root, setup.system_snapshot, "bootstrap system root"
+        )
+        return
+    if setup.product_snapshot is not None:
+        restore_directory_metadata(setup.product_root, setup.product_snapshot, "product lock root")
 
 
 def product_root_namespace_entries(product_root: Path) -> list[Path]:
-    try:
-        return sorted(product_root.iterdir(), key=lambda item: item.name)
-    except FileNotFoundError:
-        raise ReadLifecycleRetry
-    except OSError as exc:
-        fail(f"product lock namespace cannot be inspected: {exc}")
+    return bounded_directory_entries(product_root, "product lock namespace")
 
 
 def require_empty_product_namespace_without_anchor(product_root: Path) -> None:
@@ -744,27 +1083,51 @@ def require_empty_product_namespace_without_anchor(product_root: Path) -> None:
     fail(f"product lock namespace must be empty without product anchor: {names}")
 
 
-def validate_product_namespace_entries(product_root: Path) -> None:
+def product_anchor_stages_for_publication(product_root: Path) -> list[AnchorStageAlias]:
+    path = product_anchor_path(product_root)
+    data = expected_product_lock_binding_bytes()
+    aliases = validated_anchor_stage_aliases(path, data, "product lock")
+    alias_names = {alias.path.name for alias in aliases}
+    unknown = [
+        entry.name
+        for entry in product_root_namespace_entries(product_root)
+        if entry.name not in alias_names
+    ]
+    if unknown:
+        fail(f"product lock namespace contains unknown entries: {', '.join(unknown[:4])}")
+    return aliases
+
+
+def validate_product_namespace_entries(
+    product_root: Path, *, allow_target_stage_aliases: bool
+) -> None:
     entries = product_root_namespace_entries(product_root)
     allowed = {PRODUCT_LOCK_FILE_NAME, TARGET_LOCK_ROOT_NAME}
     unknown = sorted(entry.name for entry in entries if entry.name not in allowed)
     if unknown:
         fail(f"product lock namespace contains unknown entries: {', '.join(unknown[:4])}")
-    if target_lock_root_path(product_root).exists() or target_lock_root_path(product_root).is_symlink():
+    if (
+        target_lock_root_path(product_root).exists()
+        or target_lock_root_path(product_root).is_symlink()
+    ):
         require_private_directory(target_lock_root_path(product_root), "target lock root")
+        validate_target_lock_root_entries(
+            target_lock_root_path(product_root),
+            allow_stage_aliases=allow_target_stage_aliases,
+        )
 
 
 def publish_product_anchor_if_missing(product_root: Path) -> bool:
     path = product_anchor_path(product_root)
     if path.exists() or path.is_symlink():
         return False
-    require_empty_product_namespace_without_anchor(product_root)
-    created = write_atomic_anchor(
-        path,
-        expected_product_lock_binding_bytes(),
-        OWNER_FILE_MODE,
-        "product lock",
-    )
+    data = expected_product_lock_binding_bytes()
+    aliases = product_anchor_stages_for_publication(product_root)
+    if aliases:
+        created = publish_validated_anchor_stage(path, aliases[0], data, "product lock")
+    else:
+        require_empty_product_namespace_without_anchor(product_root)
+        created = write_atomic_anchor(path, data, OWNER_FILE_MODE, "product lock")
     if created:
         require_existing_managed_file(
             path, "product lock", max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
@@ -775,28 +1138,49 @@ def publish_product_anchor_if_missing(product_root: Path) -> bool:
 def publish_target_anchor_if_missing(product_root: Path, identity: str) -> Path:
     root = target_lock_root_path(product_root)
     root_preexisting = root.exists() or root.is_symlink()
-    product_root_mtime_ns = int(product_root.lstat().st_mtime_ns)
+    product_root_snapshot = directory_metadata(product_root, "product lock root")
+    root_snapshot = directory_metadata(root, "target lock root") if root_preexisting else None
     if not root_preexisting:
-        root.mkdir(mode=OWNER_DIRECTORY_MODE)
-        root.chmod(OWNER_DIRECTORY_MODE)
-        fsync_directory(product_root, "target lock root creation")
+        try:
+            root.mkdir(mode=OWNER_DIRECTORY_MODE)
+            root.chmod(OWNER_DIRECTORY_MODE)
+            fsync_directory(product_root, "target lock root creation")
+        except BaseException:
+            if root.exists() or root.is_symlink():
+                entries = bounded_directory_entries(root, "target lock root rollback")
+                if entries:
+                    fail("target lock root rollback found unexpected entries")
+                try:
+                    root.rmdir()
+                except OSError as exc:
+                    fail(f"target lock root rollback failed: {exc}")
+                fsync_directory(product_root, "target lock root rollback")
+            restore_directory_metadata(product_root, product_root_snapshot, "product lock root")
+            raise
     require_private_directory(root, "target lock root")
     path = bootstrap_lock_path_for_root(product_root, identity)
     if not (path.exists() or path.is_symlink()):
         try:
-            write_atomic_anchor(
-                path,
-                expected_bootstrap_lock_binding_bytes(identity),
-                OWNER_FILE_MODE,
-                "target lock",
-            )
+            data = expected_bootstrap_lock_binding_bytes(identity)
+            aliases = validated_anchor_stage_aliases(path, data, "target lock")
+            if aliases:
+                publish_validated_anchor_stage(path, aliases[0], data, "target lock")
+            else:
+                write_atomic_anchor(path, data, OWNER_FILE_MODE, "target lock")
         except BaseException:
             if not (path.exists() or path.is_symlink()) and not root_preexisting:
-                with contextlib.suppress(OSError):
+                entries = bounded_directory_entries(root, "target lock root rollback")
+                if entries:
+                    fail("target lock root rollback found unexpected entries")
+                try:
                     root.rmdir()
-                with contextlib.suppress(BaseException):
-                    fsync_directory(product_root, "target lock root rollback")
-                restore_directory_mtime(product_root, product_root_mtime_ns, "product lock root")
+                except OSError as exc:
+                    fail(f"target lock root rollback failed: {exc}")
+                fsync_directory(product_root, "target lock root rollback")
+                restore_directory_metadata(product_root, product_root_snapshot, "product lock root")
+            elif not (path.exists() or path.is_symlink()) and root_snapshot is not None:
+                restore_directory_metadata(root, root_snapshot, "target lock root")
+                restore_directory_metadata(product_root, product_root_snapshot, "product lock root")
             raise
     return path
 
@@ -834,14 +1218,56 @@ def require_bootstrap_lock_descriptor_for_identity(
     return opened
 
 
+def validate_target_lock_entry(path: Path) -> None:
+    expected_lock_id = path.name[: -len(TARGET_LOCK_SUFFIX)]
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"target lock must be a regular owner-private file: {exc}")
+    try:
+        require_bootstrap_lock_descriptor(descriptor, path)
+        data = read_lock_binding(descriptor, label="target lock")
+        try:
+            value = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            fail(f"target lock binding is invalid JSON: {exc}")
+        if not isinstance(value, dict):
+            fail("target lock binding must contain a JSON object")
+        target = value.get("canonical_target")
+        if not isinstance(target, str) or not target.startswith("/"):
+            fail("target lock binding canonical target is invalid")
+        validate_bootstrap_lock_binding(value, target)
+        if value.get("lock_id") != expected_lock_id:
+            fail("target lock binding does not match the lock filename")
+        if data != expected_bootstrap_lock_binding_bytes(target):
+            fail("target lock binding is not canonical")
+    finally:
+        os.close(descriptor)
+
+
 def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle | None:
     system_root = bootstrap_system_root()
     product_root = bootstrap_product_root_path(system_root)
+    product_root_snapshot_for_restore: DirectoryMetadata | None = None
     if create:
-        ensure_bootstrap_product_root()
-        product_root = bootstrap_product_root_path(system_root)
-        if not (product_anchor_path(product_root).exists() or product_anchor_path(product_root).is_symlink()):
-            publish_product_anchor_if_missing(product_root)
+        setup = ensure_bootstrap_product_root_for_publication()
+        system_root = setup.system_root
+        product_root = setup.product_root
+        product_anchor = product_anchor_path(product_root)
+        product_anchor_preexisting = product_anchor.exists() or product_anchor.is_symlink()
+        if product_anchor_preexisting and setup.product_snapshot is not None:
+            product_root_snapshot_for_restore = setup.product_snapshot
+        try:
+            if not (product_anchor.exists() or product_anchor.is_symlink()):
+                publish_product_anchor_if_missing(product_root)
+        except BaseException:
+            rollback_bootstrap_product_root_publication(setup, product_anchor)
+            raise
     else:
         if not (product_root.exists() or product_root.is_symlink()):
             return None
@@ -863,13 +1289,24 @@ def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle 
         lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(descriptor, lock_mode)
         require_product_lock_descriptor(descriptor, path)
-        validate_product_namespace_entries(product_root)
+        if exclusive:
+            product_data = expected_product_lock_binding_bytes()
+            if validated_anchor_stage_aliases(path, product_data, "product lock"):
+                product_root_snapshot_for_restore = None
+            drain_anchor_stage_aliases(path, product_data, "product lock")
+            require_product_lock_descriptor(descriptor, path)
+        else:
+            fail_if_anchor_stage_aliases_exist(
+                path, expected_product_lock_binding_bytes(), "product lock"
+            )
+        validate_product_namespace_entries(product_root, allow_target_stage_aliases=exclusive)
         return ProductLockHandle(
             descriptor=descriptor,
             path=path,
             product_root=product_root,
             system_root=system_root,
             mode=lock_mode,
+            product_root_snapshot=product_root_snapshot_for_restore,
         )
     except BaseException:
         with contextlib.suppress(OSError):
@@ -899,6 +1336,9 @@ def open_external_target_lock(
     else:
         path = bootstrap_lock_path_for_root(product_root, identity)
         if not (path.exists() or path.is_symlink()):
+            fail_if_anchor_stage_aliases_exist(
+                path, expected_bootstrap_lock_binding_bytes(identity), "target lock"
+            )
             return None
     flags = os.O_RDWR if exclusive else os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
@@ -920,6 +1360,19 @@ def open_external_target_lock(
             if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
                 fail(f"target is locked: {path}")
             fail(f"target lock failed: {exc}")
+        if exclusive:
+            drain_anchor_stage_aliases(
+                path, expected_bootstrap_lock_binding_bytes(identity), "target lock"
+            )
+            require_bootstrap_lock_descriptor_for_identity(descriptor, path, identity)
+        else:
+            fail_if_anchor_stage_aliases_exist(
+                path, expected_bootstrap_lock_binding_bytes(identity), "target lock"
+            )
+        validate_target_lock_root_entries(
+            target_lock_root_path(product_root),
+            allow_stage_aliases=False,
+        )
         require_bootstrap_lock_descriptor_for_identity(descriptor, path, identity)
         return ExternalTargetLockHandle(
             descriptor=descriptor,
@@ -965,6 +1418,10 @@ def acquire_bootstrap_lock(target: Path) -> int:
         return descriptor
     except BaseException:
         release_external_target_lock(target_lock_handle)
+        if product is not None and product.product_root_snapshot is not None:
+            restore_directory_metadata(
+                product.product_root, product.product_root_snapshot, "product lock root"
+            )
         release_product_lock(product)
         raise
 
@@ -1115,9 +1572,7 @@ def require_control_directory(path: Path, label: str, *, allow_locked: bool) -> 
     return info
 
 
-def require_lock_parent_directory(
-    path: Path, label: str, *, allow_locked: bool
-) -> os.stat_result:
+def require_lock_parent_directory(path: Path, label: str, *, allow_locked: bool) -> os.stat_result:
     info = stat_existing(path, label)
     if info is None:
         fail(f"{label} is missing")
@@ -1496,9 +1951,7 @@ def atomic_write(path: Path, data: bytes, target: Path) -> None:
 def read_json_file(
     path: Path, *, max_bytes: int, label: str, expected_mode: int | None = None
 ) -> dict[str, Any]:
-    data = read_existing_file(
-        path, max_bytes=max_bytes, label=label, expected_mode=expected_mode
-    )
+    data = read_existing_file(path, max_bytes=max_bytes, label=label, expected_mode=expected_mode)
     if data is None:
         fail(f"{label} is missing")
     try:
@@ -2029,17 +2482,14 @@ def validate_backup_envelope(
         fail("backup canonical_target is invalid")
     if envelope["canonical_target"] != str(validate_target(target, create=False)):
         fail("backup is bound to a different canonical target")
-    if (
-        not isinstance(envelope["source_setup_id"], str)
-        or not SETUP_ID_PATTERN.fullmatch(envelope["source_setup_id"])
+    if not isinstance(envelope["source_setup_id"], str) or not SETUP_ID_PATTERN.fullmatch(
+        envelope["source_setup_id"]
     ):
         fail("backup source_setup_id is invalid")
     source_profile_id = envelope["source_profile_id"]
     if source_profile_id is not None and not isinstance(source_profile_id, str):
         fail("backup source_profile_id is invalid")
-    if type(envelope["source_stamp_schema"]) is not int or envelope[
-        "source_stamp_schema"
-    ] not in {
+    if type(envelope["source_stamp_schema"]) is not int or envelope["source_stamp_schema"] not in {
         LEGACY_STAMP_SCHEMA_VERSION,
         STAMP_SCHEMA_VERSION,
     }:
@@ -2482,10 +2932,7 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
             flags |= os.O_NOFOLLOW
         descriptor = os.open(temporary, flags)
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_IMODE(opened.st_mode) != IMMUTABLE_EXEC_MODE
-        ):
+        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != IMMUTABLE_EXEC_MODE:
             fail("Grok Build launch image is not a safe executable file")
         require_current_user_owner(opened, "Grok Build launch image")
         if sha256_file_descriptor(descriptor, max_bytes=SOFTWARE_MAX_BYTES) != expected_sha256:
@@ -3151,7 +3598,9 @@ def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -
                 if status["setup_id"] == setup["id"] and status["profile_id"] == profile["id"]
                 else "switch"
             )
-            backup_required = status["setup_id"] != setup["id"] or status["profile_id"] != profile["id"]
+            backup_required = (
+                status["setup_id"] != setup["id"] or status["profile_id"] != profile["id"]
+            )
     return {
         "operation": operation,
         "setup_id": setup["id"],
@@ -3405,11 +3854,17 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
-        emit(plan_payload(target, load_setup(args.setup), load_profile(args.profile)), as_json=args.json)
+        emit(
+            plan_payload(target, load_setup(args.setup), load_profile(args.profile)),
+            as_json=args.json,
+        )
         return 0
     if args.command == "install":
         target = require_absolute_target(args.target)
-        emit(write_setup(target, load_setup(args.setup), load_profile(args.profile)), as_json=args.json)
+        emit(
+            write_setup(target, load_setup(args.setup), load_profile(args.profile)),
+            as_json=args.json,
+        )
         return 0
     if args.command == "switch":
         target = require_absolute_target(args.target)

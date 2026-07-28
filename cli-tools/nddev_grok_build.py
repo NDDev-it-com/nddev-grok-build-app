@@ -338,6 +338,7 @@ class TargetCoordination(NamedTuple):
     created_parent_chain: list[Path]
     remove_empty_target: bool
     missing: bool
+    created_target_parent_snapshot: tuple[Path, TreeEntry] | None
 
 
 class JsonArgumentParseError(Exception):
@@ -491,6 +492,21 @@ def create_missing_directories(chain: list[Path]) -> None:
 def remove_created_empty_directories(chain: list[Path]) -> None:
     for path in chain:
         remove_empty_directory_if_created(path, existed_before=False)
+
+
+def restore_directory_entry_after_cleanup(path: Path, entry: TreeEntry, label: str) -> None:
+    ensure_directory_entry(path, entry, label)
+    fsync_directory(path.parent, f"{label} parent after cleanup")
+
+
+def snapshot_created_target_parent(target: Path, *, create: bool) -> tuple[Path, TreeEntry] | None:
+    if not create or target.exists() or target.is_symlink():
+        return None
+    try:
+        parent = target.parent.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    return (parent, snapshot_directory_entry(parent, "target parent"))
 
 
 def bootstrap_system_root() -> Path:
@@ -794,6 +810,7 @@ def external_lifecycle_coordination(target: Path, *, create: bool, allow_missing
     lexical_identity = bootstrap_target_identity(target)
     try:
         handles.append(acquire_bootstrap_lock_handle_for_identity(lexical_identity))
+        created_target_parent_snapshot = snapshot_created_target_parent(target, create=create)
         created_parent_chain = missing_directory_chain(target.parent)
         remove_empty_target = create and not (target.exists() or target.is_symlink())
         target = validate_target(target, create=create)
@@ -803,7 +820,13 @@ def external_lifecycle_coordination(target: Path, *, create: bool, allow_missing
         missing = not (target.exists() or target.is_symlink())
         if missing and not allow_missing:
             fail("target is missing")
-        yield TargetCoordination(target, created_parent_chain, remove_empty_target, missing)
+        yield TargetCoordination(
+            target,
+            created_parent_chain,
+            remove_empty_target,
+            missing,
+            created_target_parent_snapshot,
+        )
         failed = False
     finally:
         for handle in reversed(handles):
@@ -1134,6 +1157,8 @@ def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
     descriptor: int | None = None
     locked_parent = False
     restore_error: BaseException | None = None
+    target_dir_snapshot: TreeEntry | None = None
+    created_target_parent_snapshot: tuple[Path, TreeEntry] | None = None
     failed = False
     with external_lifecycle_coordination(
         target, create=create, allow_missing=allow_missing
@@ -1141,6 +1166,7 @@ def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
         target = coordination.target
         created_parent_chain = coordination.created_parent_chain
         remove_empty_target = coordination.remove_empty_target
+        created_target_parent_snapshot = coordination.created_target_parent_snapshot
         try:
             if coordination.missing:
                 try:
@@ -1149,6 +1175,7 @@ def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
                     failed = True
                     raise
                 return
+            target_dir_snapshot = snapshot_directory_entry(target, "target")
             control_preexisting = (
                 managed_control_dir(target).exists() or managed_control_dir(target).is_symlink()
             )
@@ -1186,6 +1213,21 @@ def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
                 remove_created_lock_state_if_empty(target)
                 remove_empty_directory_if_created(target, existed_before=False)
             remove_created_empty_directories(created_parent_chain)
+            if failed and not remove_empty_target and target_dir_snapshot is not None:
+                try:
+                    restore_directory_entry_after_cleanup(target, target_dir_snapshot, "target")
+                except BaseException as exc:
+                    if restore_error is None:
+                        restore_error = exc
+            if failed and created_target_parent_snapshot is not None:
+                parent_path, parent_snapshot = created_target_parent_snapshot
+                try:
+                    restore_directory_entry_after_cleanup(
+                        parent_path, parent_snapshot, "target parent"
+                    )
+                except BaseException as exc:
+                    if restore_error is None:
+                        restore_error = exc
             if restore_error is not None:
                 raise restore_error
 
@@ -1615,8 +1657,6 @@ def restore_preserved_file_once(entry: PreservedFile) -> None:
         remove_file_until_absent_retry(entry.path, f"{entry.label} rollback absent")
         restore_parent_mtime(entry)
         return
-    if entry.backup_path is None:
-        fail(f"{entry.label} rollback object is missing")
     if file_matches_snapshot(
         entry.path,
         entry.snapshot,
@@ -1627,11 +1667,30 @@ def restore_preserved_file_once(entry: PreservedFile) -> None:
         fsync_directory(entry.path.parent, f"{entry.label} rollback")
         restore_parent_mtime(entry)
         return
+    if entry.backup_path is None or not (
+        entry.backup_path.exists() or entry.backup_path.is_symlink()
+    ):
+        if entry.path.exists() or entry.path.is_symlink():
+            restore_tree_file_entry(
+                entry.path,
+                TreeEntry(
+                    "file",
+                    entry.snapshot.mode,
+                    entry.snapshot.data,
+                    len(entry.snapshot.data),
+                    entry.snapshot.dev,
+                    entry.snapshot.ino,
+                    entry.snapshot.mtime_ns,
+                ),
+                max_bytes=entry.max_bytes,
+                label=entry.label,
+            )
+            restore_parent_mtime(entry)
+            return
+        fail(f"{entry.label} rollback object disappeared")
     if entry.path.exists() or entry.path.is_symlink():
         durable_unlink(entry.path, f"{entry.label} rollback replacement")
     ensure_private_parent(entry.path, entry.target)
-    if not (entry.backup_path.exists() or entry.backup_path.is_symlink()):
-        fail(f"{entry.label} rollback object disappeared")
     try:
         os.replace(entry.backup_path, entry.path)
     except OSError as exc:
@@ -1726,13 +1785,22 @@ def restore_preserved_tree_once(entry: PreservedTree) -> None:
         return
     if entry.backup_path is None:
         fail(f"{entry.label} tree rollback object is missing")
+    if not (entry.backup_path.exists() or entry.backup_path.is_symlink()):
+        if entry.path.exists() or entry.path.is_symlink():
+            restore_tree_retry(
+                entry.path,
+                entry.snapshot,
+                max_bytes=entry.max_bytes,
+                label=entry.label,
+            )
+            restore_tree_parent_mtime(entry)
+            return
+        fail(f"{entry.label} tree rollback object disappeared")
     if entry.path.exists() or entry.path.is_symlink():
         remove_tree_until_absent_retry(
             entry.path, max_bytes=entry.max_bytes, label=f"{entry.label} tree replacement"
         )
     ensure_private_parent(entry.path, entry.target)
-    if not (entry.backup_path.exists() or entry.backup_path.is_symlink()):
-        fail(f"{entry.label} tree rollback object disappeared")
     try:
         os.replace(entry.backup_path, entry.path)
     except OSError as exc:
@@ -4598,15 +4666,15 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 software_atomic_write(
                     software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
                 )
+                validate_intended_software_state(target, stamp_bytes, artifact["binary"])
+                cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+                cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
                 restore_tree_retry(
                     control_tmp_dir(target),
                     snapshot.control_tmp,
                     max_bytes=SOFTWARE_MAX_BYTES,
                     label="control tmp",
                 )
-                validate_intended_software_state(target, stamp_bytes, artifact["binary"])
-                cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
-                cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
             except BaseException:
                 restore_software_snapshot_retry(target, snapshot)
                 raise
@@ -4692,15 +4760,15 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
         removed = software_present_paths_from_snapshot(snapshot)
         try:
             remove_grok_software_state_once(target)
+            validate_removed_software_state(target)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+            cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
             restore_tree_retry(
                 control_tmp_dir(target),
                 snapshot.control_tmp,
                 max_bytes=SOFTWARE_MAX_BYTES,
                 label="control tmp",
             )
-            validate_removed_software_state(target)
-            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
-            cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
         except BaseException:
             restore_software_snapshot_retry(target, snapshot)
             raise

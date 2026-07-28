@@ -23,7 +23,7 @@ Target lifecycle commands serialize through manager-owned lifecycle locks.
 Cooperative manager operations for the same target are denied or serialized
 while setup mutation, software mutation, restore, remove, migrate, status-read
 requiring owned state, or managed launch is in progress. The exact bootstrap and
-target-local lock mechanics are intentionally not copied here; use the manager
+external canonical-target lock mechanics are intentionally not copied here; use the manager
 source and the public contract fields as the executable reference.
 The setup `update` command refreshes the installed setup/profile identity from
 module-owned sources; it is distinct from `update-cli`, which only manages the

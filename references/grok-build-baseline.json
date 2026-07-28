@@ -153,7 +153,7 @@
     "ubuntu_libc": "glibc",
     "upstream_ubuntu_version_floor": null,
     "upstream_glibc_floor": null,
-    "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before target resolution, target inspection, target creation, bootstrap lock, target lock, installer fetch, installer staging, or launch child execution.",
+    "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before target resolution, target inspection, target creation, product coordination, target anchor, installer fetch, installer staging, or launch child execution.",
     "official_installer_assets": {
       "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
       "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],

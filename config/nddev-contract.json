@@ -93,13 +93,23 @@
     "external_bootstrap_lock_uses_fixed_system_temp_root": true,
     "external_bootstrap_lock_ignores_ambient_tmpdir": true,
     "external_bootstrap_lock_json_binding": true,
+    "external_bootstrap_product_anchor": "global.lock",
+    "external_bootstrap_target_anchor_root": "target-locks",
+    "external_anchor_final_path_commit_point": true,
+    "external_anchor_no_replace_publication": true,
+    "external_anchor_hardlink_alias_recovery": true,
+    "external_anchor_final_unlinked_on_recovery": false,
+    "external_read_only_cold_no_anchor_creates_lock": false,
+    "external_read_only_seeded_uses_product_coordination": true,
     "external_lock_acquired_before_target_inspection": true,
-    "external_lock_released_after_internal_lock": true,
+    "external_product_handoff_to_target_anchor": true,
     "external_lock_not_exposed_to_child_env": true,
-    "persistent_flock_lock_file": true,
+    "persistent_external_flock_anchors": true,
     "control_root_stays_writable_while_locked": true,
-    "lock_parent_non_writable_while_held": true,
-    "lock_held_through_launch_child": true,
+    "target_local_lock_created": false,
+    "target_anchor_lock_held_through_launch_child": true,
+    "same_canonical_target_serialized": true,
+    "different_canonical_targets_concurrent_after_handoff": true,
     "concurrent_setup_mutations_denied_while_launching": true,
     "legacy_sibling_backups_read_only_when_strictly_validated": true,
     "bounded_managed_reads": true,
@@ -182,7 +192,7 @@
         "linux-musl",
         "unsupported-architecture"
       ],
-      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, bootstrap lock, target lock, installer fetch, installer staging, or launch child execution"
+      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, product coordination, target anchor, installer fetch, installer staging, or launch child execution"
     },
     "vendor_platform_observations": {
       "official_installer_assets": {

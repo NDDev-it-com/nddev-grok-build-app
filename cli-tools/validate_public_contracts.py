@@ -174,8 +174,8 @@ EXPECTED_PLATFORM_DETECTION = {
     "linux_distro_sources": ["/etc/os-release", "/usr/lib/os-release"],
     "standard_unsupported_categories": EXPECTED_UNSUPPORTED_PLATFORMS,
     "non_ubuntu_rejection": (
-        "before target resolution, target inspection, target creation, bootstrap lock, "
-        "target lock, installer fetch, installer staging, or launch child execution"
+        "before target resolution, target inspection, target creation, product coordination, "
+        "target anchor, installer fetch, installer staging, or launch child execution"
     ),
 }
 EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
@@ -454,9 +454,17 @@ def validate_manager_source() -> None:
         'LOCK_DIR_NAME = "locks"',
         "BOOTSTRAP_LOCK_NAMESPACE",
         "def bootstrap_system_root()",
+        "PRODUCT_LOCK_FILE_NAME = \"global.lock\"",
+        "TARGET_LOCK_ROOT_NAME = \"target-locks\"",
+        "def publish_product_anchor_if_missing(",
+        "def publish_target_anchor_if_missing(",
+        "def recover_anchor_publication_alias(",
+        "def acquire_product_lock(",
+        "def open_external_target_lock(",
         "def acquire_bootstrap_lock(",
         "while offset < len(data)",
-        "bootstrap lock binding write made no progress",
+        "binding write made no progress",
+        "os.link(temporary, path)",
         '"remove-cli"',
         '"update"',
         "def update_setup(",
@@ -573,23 +581,6 @@ def run_archive_command(archive: Path, command: list[str], env: dict[str, str]) 
         )
 
 
-def cleanup_bootstrap_lock_for_target(manager: Any, target: Path) -> None:
-    parent = target.parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    system_root = Path("/tmp").resolve(strict=True)
-    product_root = manager.bootstrap_product_root_path(system_root)
-    identities = {
-        manager.bootstrap_target_identity(target),
-        str(target.resolve(strict=False)),
-    }
-    for identity in identities:
-        lock_path = product_root / manager.bootstrap_lock_digest(identity)
-        with contextlib.suppress(FileNotFoundError):
-            lock_path.unlink()
-    with contextlib.suppress(OSError):
-        product_root.rmdir()
-
-
 def validate_clean_archive_cache_smoke() -> None:
     with tempfile.TemporaryDirectory(prefix="nddev-grok-build-archive-smoke-") as raw:
         scratch = Path(raw)
@@ -634,20 +625,30 @@ def validate_clean_archive_cache_smoke() -> None:
                 sys.executable,
                 "-B",
                 "cli-tools/nddev_grok_build.py",
-                "remove-cli",
+                "software-status",
                 "--target",
                 str(status_target),
                 "--json",
             ],
+            [
+                sys.executable,
+                "-B",
+                "cli-tools/nddev_grok_build.py",
+                "plan",
+                "--target",
+                str(status_target),
+                "--setup",
+                "nddev-builder",
+                "--profile",
+                "full-auto",
+                "--json",
+            ],
         ]
-        try:
-            for command in commands:
-                run_archive_command(archive, command, env)
-                validate_no_python_caches(archive)
-        finally:
-            cleanup_bootstrap_lock_for_target(manager, status_target)
-            if bootstrap_artifact_snapshot(manager) != bootstrap_before:
-                raise ValueError("archive cache smoke left bootstrap lock residue")
+        for command in commands:
+            run_archive_command(archive, command, env)
+            validate_no_python_caches(archive)
+        if bootstrap_artifact_snapshot(manager) != bootstrap_before:
+            raise ValueError("archive cache smoke left bootstrap lock residue")
 
 
 def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
@@ -706,8 +707,6 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
         b'printf state > "$XDG_STATE_HOME/grok-build/session.txt"\n'
         b'printf tmp > "$TMPDIR/grok-build/tmp.txt"\n'
         b'printf target > "$GROK_HOME/runtime-state/target.txt"\n'
-        b'if rm "$GROK_HOME/.nddev-grok-build/locks/target.lock" 2>/dev/null; then exit 70; fi\n'
-        b'if rmdir "$GROK_HOME/.nddev-grok-build/locks" 2>/dev/null; then exit 71; fi\n'
         b'if (printf bad > "$0") 2>/dev/null; then exit 72; fi\n'
         b'printf ok > "$GROK_HOME/runtime-state/result.txt"\n'
     )
@@ -734,11 +733,8 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
         != manager.OWNER_DIRECTORY_MODE
     ):
         raise ValueError("control root must stay writable after launch")
-    if (
-        stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
-        != manager.OWNER_DIRECTORY_MODE
-    ):
-        raise ValueError("lock parent was not restored after launch")
+    if manager.lock_parent_dir(target).exists() or manager.lock_parent_dir(target).is_symlink():
+        raise ValueError("launch created target-local lock residue")
     if manager.launch_image_dir(target).exists():
         raise ValueError("launch image directory was not pruned after launch")
 
@@ -1076,9 +1072,19 @@ def bootstrap_artifact_snapshot(manager: Any) -> Any:
     if root_snapshot.get("kind") != "directory":
         return {"root": root_snapshot, "entries": ()}
     entries: list[tuple[str, dict[str, Any]]] = []
-    for path in sorted(root.iterdir(), key=lambda item: item.name):
-        entries.append((path.name, snapshot_path(path)))
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        entries.append((path.relative_to(root).as_posix(), snapshot_path(path)))
     return {"root": root_snapshot, "entries": tuple(entries)}
+
+
+def validate_no_bootstrap_publication_aliases(manager: Any) -> None:
+    root = manager.bootstrap_product_root_path(manager.bootstrap_system_root())
+    if not (root.exists() or root.is_symlink()):
+        return
+    pattern = re.compile(r"\..+\.[0-9]{1,20}\.[0-9]{1,20}\.tmp\Z")
+    for path in root.rglob("*"):
+        if pattern.fullmatch(path.name):
+            raise ValueError(f"bootstrap publication alias residue remains: {path}")
 
 
 @contextlib.contextmanager
@@ -1103,7 +1109,7 @@ def isolated_bootstrap_root(manager: Any):
 
 
 def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
-    identity = manager.bootstrap_target_identity(target)
+    identity = manager.canonical_target_identity(target.resolve(strict=True))
     descriptor = manager.acquire_bootstrap_lock(target)
     path = manager.bootstrap_lock_path(identity)
     initial = path.lstat()
@@ -1172,7 +1178,7 @@ def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
 
 
 def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
-    identity = manager.bootstrap_target_identity(target)
+    identity = manager.canonical_target_identity(target.resolve(strict=True))
     path = manager.bootstrap_lock_path(identity)
 
     def write_raw_binding(data: bytes) -> None:
@@ -1241,6 +1247,49 @@ def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
         manager.os.write = original_write
     descriptor = manager.acquire_bootstrap_lock(target)
     manager.release_bootstrap_lock(descriptor)
+
+
+def validate_anchor_recovery_smokes(manager: Any, target: Path) -> None:
+    descriptor = manager.acquire_bootstrap_lock(target)
+    manager.release_bootstrap_lock(descriptor)
+    identity = manager.canonical_target_identity(target.resolve(strict=True))
+    product_root = manager.bootstrap_product_root_path(manager.bootstrap_system_root())
+    product_anchor = manager.product_anchor_path(product_root)
+    target_anchor = manager.bootstrap_lock_path(identity)
+
+    for anchor, recover in (
+        (product_anchor, lambda: manager.status_payload(target)),
+        (
+            target_anchor,
+            lambda: manager.release_bootstrap_lock(manager.acquire_bootstrap_lock(target)),
+        ),
+    ):
+        before = anchor.lstat()
+        alias = anchor.with_name(f".{anchor.name}.123.456.tmp")
+        os.link(anchor, alias)
+        if anchor.lstat().st_nlink != 2:
+            raise ValueError("anchor recovery setup did not create a hardlink alias")
+        recover()
+        after = anchor.lstat()
+        if alias.exists() or alias.is_symlink():
+            raise ValueError("anchor recovery did not remove the publication alias")
+        if after.st_nlink != 1:
+            raise ValueError("anchor recovery did not restore nlink==1")
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("anchor recovery changed the final anchor inode")
+
+    unknown = target_anchor.with_name(f"{target_anchor.name}.unknown-hardlink")
+    os.link(target_anchor, unknown)
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.release_bootstrap_lock(manager.acquire_bootstrap_lock(target)),
+            "recoverable publication alias",
+        )
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            unknown.unlink()
+    validate_no_bootstrap_publication_aliases(manager)
 
 
 def validate_fetch_error_smokes(manager: Any) -> None:
@@ -1471,6 +1520,7 @@ def validate_platform_scope(
     original_read = manager.read_pinned_installer
     original_stage = manager.run_vendor_installer
     original_popen = manager.subprocess.Popen
+    original_product_lock = manager.acquire_product_lock
     original_bootstrap = manager.acquire_bootstrap_lock
     original_bootstrap_handle = manager.acquire_bootstrap_lock_handle_for_identity
     original_validate_target = manager.validate_target
@@ -1516,6 +1566,7 @@ def validate_platform_scope(
         manager.read_pinned_installer = fail_fetch
         manager.run_vendor_installer = fail_stage
         manager.subprocess.Popen = FailLaunch
+        manager.acquire_product_lock = fail_bootstrap
         manager.acquire_bootstrap_lock = fail_bootstrap
         manager.acquire_bootstrap_lock_handle_for_identity = fail_bootstrap
         manager.validate_target = fail_target
@@ -1549,6 +1600,7 @@ def validate_platform_scope(
         manager.read_pinned_installer = original_read
         manager.run_vendor_installer = original_stage
         manager.subprocess.Popen = original_popen
+        manager.acquire_product_lock = original_product_lock
         manager.acquire_bootstrap_lock = original_bootstrap
         manager.acquire_bootstrap_lock_handle_for_identity = original_bootstrap_handle
         manager.validate_target = original_validate_target
@@ -1558,15 +1610,17 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
     setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
     profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
     order: list[str] = []
-    external_depth = {"value": 0}
-    original_acquire = manager.acquire_bootstrap_lock_handle_for_identity
-    original_release = manager.release_bootstrap_lock_handle
+    product_depth = {"value": 0}
+    target_depth = {"value": 0}
+    original_acquire_product = manager.acquire_product_lock
+    original_release_product = manager.release_product_lock
+    original_open_target_lock = manager.open_external_target_lock
+    original_release_target_lock = manager.release_external_target_lock
     original_validate_target = manager.validate_target
     original_require_parent = manager.require_safe_target_parent
     original_missing_chain = manager.missing_directory_chain
     original_status_locked = manager.status_payload_locked
     original_software_locked = manager.software_status_locked
-    original_target_lock = manager.acquire_target_lock
     original_lifecycle_snapshot = manager.snapshot_lifecycle_state
     original_software_snapshot = manager.snapshot_software_state
     original_read_stamp = manager.read_stamp
@@ -1574,22 +1628,54 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
     original_stage = manager.run_vendor_installer
     original_popen = manager.subprocess.Popen
 
+    def external_depth() -> int:
+        return product_depth["value"] + target_depth["value"]
+
     def require_external(label: str) -> None:
-        if external_depth["value"] <= 0:
+        if external_depth() <= 0:
             raise ValueError(f"{label} ran before external lifecycle lock")
         order.append(label)
 
-    def traced_acquire(identity: str) -> Any:
-        order.append(f"external-enter:{identity}")
-        handle = original_acquire(identity)
-        external_depth["value"] += 1
-        order.append(f"external-held:{identity}")
+    def traced_acquire_product(*, create: bool, exclusive: bool) -> Any:
+        order.append(f"product-enter:create={create}:exclusive={exclusive}")
+        handle = original_acquire_product(create=create, exclusive=exclusive)
+        if handle is not None:
+            product_depth["value"] += 1
+            order.append(f"product-held:{handle.path.name}")
         return handle
 
-    def traced_release(handle: Any) -> None:
-        original_release(handle)
-        external_depth["value"] -= 1
-        order.append(f"external-release:{handle.path.name}")
+    def traced_release_product(handle: Any) -> None:
+        if handle is not None:
+            original_release_product(handle)
+            product_depth["value"] -= 1
+            order.append(f"product-release:{handle.path.name}")
+
+    def traced_open_target_lock(
+        product_root: Path,
+        identity: str,
+        *,
+        exclusive: bool,
+        create: bool,
+        blocking: bool = False,
+    ) -> Any:
+        require_external("open_external_target_lock")
+        handle = original_open_target_lock(
+            product_root,
+            identity,
+            exclusive=exclusive,
+            create=create,
+            blocking=blocking,
+        )
+        if handle is not None:
+            target_depth["value"] += 1
+            order.append(f"target-held:{handle.path.name}")
+        return handle
+
+    def traced_release_target_lock(handle: Any) -> None:
+        if handle is not None:
+            original_release_target_lock(handle)
+            target_depth["value"] -= 1
+            order.append(f"target-release:{handle.path.name}")
 
     def traced_validate(target: Path, *, create: bool = False) -> Path:
         require_external("validate_target")
@@ -1610,10 +1696,6 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
     def traced_software(target: Path) -> dict[str, Any]:
         require_external("software_status_locked")
         return original_software_locked(target)
-
-    def traced_target_lock(target: Path) -> int:
-        require_external("acquire_target_lock")
-        return original_target_lock(target)
 
     def traced_lifecycle_snapshot(*args: Any, **kwargs: Any) -> Any:
         require_external("snapshot_lifecycle_state")
@@ -1669,14 +1751,15 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
         return tuple(entries)
 
     try:
-        manager.acquire_bootstrap_lock_handle_for_identity = traced_acquire
-        manager.release_bootstrap_lock_handle = traced_release
+        manager.acquire_product_lock = traced_acquire_product
+        manager.release_product_lock = traced_release_product
+        manager.open_external_target_lock = traced_open_target_lock
+        manager.release_external_target_lock = traced_release_target_lock
         manager.validate_target = traced_validate
         manager.require_safe_target_parent = traced_parent
         manager.missing_directory_chain = traced_missing
         manager.status_payload_locked = traced_status
         manager.software_status_locked = traced_software
-        manager.acquire_target_lock = traced_target_lock
         manager.snapshot_lifecycle_state = traced_lifecycle_snapshot
         manager.snapshot_software_state = traced_software_snapshot
         manager.read_stamp = traced_read_stamp
@@ -1686,7 +1769,8 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
         with tempfile.TemporaryDirectory(prefix="nddev-grok-build-order-") as raw:
             tmp = Path(raw)
             target = tmp / "target"
-            manager.bootstrap_target_identity(target)
+            seed = manager.acquire_product_lock(create=True, exclusive=True)
+            manager.release_product_lock(seed)
             for operation in (
                 lambda: manager.status_payload(target),
                 lambda: manager.software_status(target),
@@ -1716,25 +1800,30 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
             )
             if failure_target.exists() or failure_target.is_symlink():
                 raise ValueError("failed install-cli ordering smoke left target state")
-            if exact_bootstrap_tree(manager.bootstrap_system_root()) != bootstrap_before_failure:
-                raise ValueError("failed install-cli ordering smoke changed bootstrap lock state")
+            after_failure = exact_bootstrap_tree(manager.bootstrap_system_root())
+            if after_failure == bootstrap_before_failure:
+                raise ValueError("failed install-cli did not publish monotonic target coordination")
+            validate_no_bootstrap_publication_aliases(manager)
     finally:
-        manager.acquire_bootstrap_lock_handle_for_identity = original_acquire
-        manager.release_bootstrap_lock_handle = original_release
+        manager.acquire_product_lock = original_acquire_product
+        manager.release_product_lock = original_release_product
+        manager.open_external_target_lock = original_open_target_lock
+        manager.release_external_target_lock = original_release_target_lock
         manager.validate_target = original_validate_target
         manager.require_safe_target_parent = original_require_parent
         manager.missing_directory_chain = original_missing_chain
         manager.status_payload_locked = original_status_locked
         manager.software_status_locked = original_software_locked
-        manager.acquire_target_lock = original_target_lock
         manager.snapshot_lifecycle_state = original_lifecycle_snapshot
         manager.snapshot_software_state = original_software_snapshot
         manager.read_stamp = original_read_stamp
         manager.read_pinned_installer = original_read_installer
         manager.run_vendor_installer = original_stage
         manager.subprocess.Popen = original_popen
-    if not order or not any(item.startswith("external-held:") for item in order):
+    if not order or not any(item.startswith("product-held:") for item in order):
         raise ValueError("lifecycle ordering smoke did not exercise external lock")
+    if not any(item.startswith("target-held:") for item in order):
+        raise ValueError("lifecycle ordering smoke did not exercise target lock handoff")
 
 
 def validate_adversarial_smokes(manager: Any) -> None:
@@ -1773,6 +1862,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
 
         validate_bootstrap_handover_smoke(manager, target)
         validate_bootstrap_binding_smokes(manager, target)
+        validate_anchor_recovery_smokes(manager, target)
         validate_restore_backup_smokes(manager, target, setup)
         validate_remove_cli_smokes(manager, tmp, setup, profile)
 
@@ -1800,34 +1890,13 @@ def validate_adversarial_smokes(manager: Any) -> None:
         class FakePopen:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
                 control = manager.managed_control_dir(target)
-                lock_parent = manager.lock_parent_dir(target)
-                renamed_lock_parent = lock_parent.with_name(f"{lock_parent.name}.renamed")
-                lock = manager.lock_path(target)
                 control_mode = stat.S_IMODE(control.lstat().st_mode)
                 if control_mode != manager.OWNER_DIRECTORY_MODE:
                     raise ValueError("launch made the control root non-writable")
-                lock_parent_mode = stat.S_IMODE(lock_parent.lstat().st_mode)
-                if lock_parent_mode != manager.LOCK_PARENT_HELD_MODE:
-                    raise ValueError("launch did not make the lock parent non-writable")
-                lock_info = lock.lstat()
-                if not stat.S_ISREG(lock_info.st_mode):
-                    raise ValueError("launch lock must be a regular file")
-                if stat.S_IMODE(lock_info.st_mode) != manager.OWNER_FILE_MODE:
-                    raise ValueError("launch lock file must have mode 0600")
-                try:
-                    lock.unlink()
-                except PermissionError:
-                    pass
-                else:
-                    raise ValueError("launch child could unlink the held lock file")
-                try:
-                    lock_parent.rmdir()
-                except OSError:
-                    pass
-                else:
-                    raise ValueError("launch child could remove the held lock parent")
-                lock_parent.rename(renamed_lock_parent)
-                self.renamed_lock_parent = renamed_lock_parent
+                if manager.lock_parent_dir(target).exists() or manager.lock_parent_dir(
+                    target
+                ).is_symlink():
+                    raise ValueError("launch created target-local lock residue")
                 fork_expect_manager_error(
                     manager,
                     lambda: manager.remove_setup(target),
@@ -1864,10 +1933,6 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 self.returncode = 0
 
             def wait(self) -> int:
-                renamed_lock = self.renamed_lock_parent / manager.LOCK_FILE_NAME
-                if not renamed_lock.is_file():
-                    raise ValueError("renamed launch lock was released before child exit")
-                self.renamed_lock_parent.rename(manager.lock_parent_dir(target))
                 return self.returncode
 
             def kill(self) -> None:
@@ -1879,11 +1944,8 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 raise ValueError("stubbed launch did not return success")
         finally:
             manager.subprocess.Popen = original_popen
-        if (
-            stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
-            != manager.OWNER_DIRECTORY_MODE
-        ):
-            raise ValueError("launch lock parent was not restored")
+        if manager.lock_parent_dir(target).exists() or manager.lock_parent_dir(target).is_symlink():
+            raise ValueError("launch left target-local lock residue")
         if manager.launch_image_dir(target).exists():
             raise ValueError("launch image directory was not removed")
 
@@ -2143,10 +2205,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest transaction_policy missing")
     if transaction.get("existing_target_mode_required") != "0700":
         raise ValueError("manifest must require existing target mode 0700")
-    if not str(transaction.get("external_bootstrap_lock", "")).startswith(
-        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/"
-    ):
-        raise ValueError("manifest external bootstrap lock path must use fixed system temp root")
+    lock_surface = str(transaction.get("external_bootstrap_lock", ""))
+    if "global.lock" not in lock_surface or "target-locks/<sha256" not in lock_surface:
+        raise ValueError("manifest external bootstrap lock path must name product and target anchors")
     if "/private/tmp" not in str(
         transaction.get("external_bootstrap_lock_system_root", "")
     ) or "/tmp" not in str(transaction.get("external_bootstrap_lock_system_root", "")):
@@ -2159,42 +2220,60 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest external bootstrap lock must be persistent")
     if transaction.get("external_bootstrap_lock_unlinked_on_release") is not False:
         raise ValueError("manifest external bootstrap lock must not be unlinked on release")
+    if transaction.get("external_bootstrap_product_anchor") != "global.lock":
+        raise ValueError("manifest external product anchor mismatch")
+    if transaction.get("external_bootstrap_target_anchor_root") != "target-locks":
+        raise ValueError("manifest external target anchor root mismatch")
+    if transaction.get("external_bootstrap_target_anchor_suffix") != ".lock":
+        raise ValueError("manifest external target anchor suffix mismatch")
     if "JSON" not in str(transaction.get("external_bootstrap_lock_binding", "")):
         raise ValueError("manifest external bootstrap lock binding missing")
     identity_description = str(transaction.get("external_bootstrap_lock_target_identity", ""))
-    if "lexically normalized absolute target" not in identity_description:
-        raise ValueError("manifest external bootstrap target identity mismatch")
-    if "canonical target is derived under external coordination" not in identity_description:
+    if "canonical target" not in identity_description:
         raise ValueError("manifest canonical target handoff ordering mismatch")
+    if "cold read-only no-anchor" not in identity_description:
+        raise ValueError("manifest cold read-only exception mismatch")
     if transaction.get("external_bootstrap_lock_from_ambient_tmpdir") is not False:
         raise ValueError("manifest external bootstrap lock must ignore ambient TMPDIR")
     if transaction.get("external_bootstrap_lock_child_env") is not False:
         raise ValueError("manifest external bootstrap lock must not be exposed to child env")
     if transaction.get("external_lock_acquired_before_target_inspection") is not True:
         raise ValueError("manifest external lock must be acquired before target inspection")
-    if transaction.get("lock") != "$GROK_HOME/.nddev-grok-build/locks/target.lock":
-        raise ValueError("manifest lock must be target-internal")
-    if transaction.get("lock_parent") != "$GROK_HOME/.nddev-grok-build/locks":
-        raise ValueError("manifest lock parent mismatch")
-    if transaction.get("lock_type") != "persistent regular file with fcntl.flock":
+    if "lock" in transaction or "lock_parent" in transaction:
+        raise ValueError("manifest must not publish a target-local lock path")
+    if "external regular files with fcntl.flock" not in str(transaction.get("lock_type", "")):
         raise ValueError("manifest lock_type mismatch")
     if transaction.get("lock_file_mode") != "0600":
         raise ValueError("manifest lock file mode mismatch")
     if transaction.get("control_root_mode_while_locked") != "0700":
         raise ValueError("manifest must keep the control root writable while locked")
-    if transaction.get("lock_parent_mode_while_held") != "0500":
-        raise ValueError("manifest lock held parent mode mismatch")
-    if transaction.get("lock_parent_mode_when_unlocked") != "0700":
-        raise ValueError("manifest unlocked parent mode mismatch")
-    if transaction.get("lock_held_through_launch_child") is not True:
-        raise ValueError("manifest must require launch to hold the lock through child exit")
+    if transaction.get("target_local_lock_created") is not False:
+        raise ValueError("manifest must declare no target-local lock creation")
+    if transaction.get("target_anchor_lock_held_through_launch_child") is not True:
+        raise ValueError("manifest must require launch to hold the target anchor through child exit")
     if transaction.get("lock_crash_recovery") is not True:
         raise ValueError("manifest must declare lock crash recovery")
     if transaction.get("lock_order") != (
-        "external bootstrap lock first, target-internal lock second; "
-        "release target-internal first, external last"
+        "product anchor lock first, canonical target anchor handoff second; "
+        "different targets run concurrently after product handoff"
     ):
         raise ValueError("manifest lock ordering mismatch")
+    if "hard-link no-replace" not in str(transaction.get("external_anchor_publication", "")):
+        raise ValueError("manifest must declare hard-link no-replace publication")
+    if transaction.get("external_anchor_commit_point") != "final-path publication":
+        raise ValueError("manifest anchor commit point mismatch")
+    if transaction.get("external_anchor_hardlink_alias_recovery") is not True:
+        raise ValueError("manifest must declare hardlink alias recovery")
+    if transaction.get("external_anchor_final_unlinked_on_recovery") is not False:
+        raise ValueError("manifest must never unlink final anchors during recovery")
+    if transaction.get("external_read_only_cold_no_anchor_creates_lock") is not False:
+        raise ValueError("manifest cold read-only path must create no anchors")
+    if transaction.get("external_read_only_seeded_uses_product_coordination") is not True:
+        raise ValueError("manifest seeded read-only path must use product coordination")
+    if transaction.get("same_canonical_target_serialized") is not True:
+        raise ValueError("manifest must serialize same canonical targets")
+    if transaction.get("different_canonical_targets_concurrent_after_handoff") is not True:
+        raise ValueError("manifest must allow different targets after product handoff")
     if transaction.get("launch_requires_current_software") is not True:
         raise ValueError("manifest must require current software for launch")
     if transaction.get("atomic_write_order") != (
@@ -2248,13 +2327,17 @@ def main(argv: list[str] | None = None) -> int:
         "external_bootstrap_lock_uses_fixed_system_temp_root",
         "external_bootstrap_lock_ignores_ambient_tmpdir",
         "external_bootstrap_lock_json_binding",
+        "external_anchor_final_path_commit_point",
+        "external_anchor_no_replace_publication",
+        "external_anchor_hardlink_alias_recovery",
         "external_lock_acquired_before_target_inspection",
-        "external_lock_released_after_internal_lock",
+        "external_product_handoff_to_target_anchor",
         "external_lock_not_exposed_to_child_env",
-        "persistent_flock_lock_file",
+        "persistent_external_flock_anchors",
         "control_root_stays_writable_while_locked",
-        "lock_parent_non_writable_while_held",
-        "lock_held_through_launch_child",
+        "target_anchor_lock_held_through_launch_child",
+        "same_canonical_target_serialized",
+        "different_canonical_targets_concurrent_after_handoff",
         "concurrent_setup_mutations_denied_while_launching",
         "legacy_sibling_backups_read_only_when_strictly_validated",
         "restore_validates_backup_envelope_before_mutation",
@@ -2280,6 +2363,18 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if safety.get(key) is not True:
             raise ValueError(f"contract safety must set {key}=true")
+    if safety.get("external_bootstrap_product_anchor") != "global.lock":
+        raise ValueError("contract safety product anchor mismatch")
+    if safety.get("external_bootstrap_target_anchor_root") != "target-locks":
+        raise ValueError("contract safety target anchor root mismatch")
+    if safety.get("external_anchor_final_unlinked_on_recovery") is not False:
+        raise ValueError("contract safety must never unlink final anchors during recovery")
+    if safety.get("external_read_only_cold_no_anchor_creates_lock") is not False:
+        raise ValueError("contract safety cold read-only path must create no anchors")
+    if safety.get("external_read_only_seeded_uses_product_coordination") is not True:
+        raise ValueError("contract safety seeded read-only path mismatch")
+    if safety.get("target_local_lock_created") is not False:
+        raise ValueError("contract safety must declare no target-local lock creation")
     if safety.get("atomic_write_order") != (
         "temporary write, temporary mode, file fsync, replace, parent fsync"
     ):

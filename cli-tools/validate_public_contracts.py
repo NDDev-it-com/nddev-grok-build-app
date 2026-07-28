@@ -455,8 +455,8 @@ def validate_manager_source() -> None:
         'LOCK_DIR_NAME = "locks"',
         "BOOTSTRAP_LOCK_NAMESPACE",
         "def bootstrap_system_root()",
-        "PRODUCT_LOCK_FILE_NAME = \"global.lock\"",
-        "TARGET_LOCK_ROOT_NAME = \"target-locks\"",
+        'PRODUCT_LOCK_FILE_NAME = "global.lock"',
+        'TARGET_LOCK_ROOT_NAME = "target-locks"',
         "def publish_product_anchor_if_missing(",
         "def publish_target_anchor_if_missing(",
         "def recover_anchor_publication_alias(",
@@ -1916,9 +1916,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 control_mode = stat.S_IMODE(control.lstat().st_mode)
                 if control_mode != manager.OWNER_DIRECTORY_MODE:
                     raise ValueError("launch made the control root non-writable")
-                if manager.lock_parent_dir(target).exists() or manager.lock_parent_dir(
-                    target
-                ).is_symlink():
+                if (
+                    manager.lock_parent_dir(target).exists()
+                    or manager.lock_parent_dir(target).is_symlink()
+                ):
                     raise ValueError("launch created target-local lock residue")
                 fork_expect_manager_error(
                     manager,
@@ -2230,7 +2231,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest must require existing target mode 0700")
     lock_surface = str(transaction.get("external_bootstrap_lock", ""))
     if "global.lock" not in lock_surface or "target-locks/<sha256" not in lock_surface:
-        raise ValueError("manifest external bootstrap lock path must name product and target anchors")
+        raise ValueError(
+            "manifest external bootstrap lock path must name product and target anchors"
+        )
     if "/private/tmp" not in str(
         transaction.get("external_bootstrap_lock_system_root", "")
     ) or "/tmp" not in str(transaction.get("external_bootstrap_lock_system_root", "")):
@@ -2273,7 +2276,9 @@ def main(argv: list[str] | None = None) -> int:
     if transaction.get("target_local_lock_created") is not False:
         raise ValueError("manifest must declare no target-local lock creation")
     if transaction.get("target_anchor_lock_held_through_launch_child") is not True:
-        raise ValueError("manifest must require launch to hold the target anchor through child exit")
+        raise ValueError(
+            "manifest must require launch to hold the target anchor through child exit"
+        )
     if transaction.get("lock_crash_recovery") is not True:
         raise ValueError("manifest must declare lock crash recovery")
     if transaction.get("lock_order") != (

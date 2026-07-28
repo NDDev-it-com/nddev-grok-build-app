@@ -6649,6 +6649,7 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
 
 def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     require_supported_runtime_platform()
+
     def build_plan(target: Path) -> dict[str, Any]:
         status = status_payload_locked(target)
         canonical_target = validate_target(target, create=False)

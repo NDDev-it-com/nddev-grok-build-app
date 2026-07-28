@@ -133,6 +133,7 @@
     "cleanup_journal_top_level_pending": true,
     "cleanup_journal_mutation_only_recovery": true,
     "cleanup_journal_read_only_recovery": false,
+    "cleanup_journal_serialized_max_bytes": 33554432,
     "cleanup_pending_status_plan_software_status_metadata": true,
     "cleanup_pending_drain_is_lifecycle_work": true,
     "supported_host_preflight_before_target_resolution": true,

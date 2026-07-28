@@ -61,6 +61,7 @@ TARGET_LOCK_NAMESPACE = f"{PRODUCT_NAME}:target-lock:v1"
 BOOTSTRAP_LOCK_NAMESPACE = TARGET_LOCK_NAMESPACE
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
+CLEANUP_JOURNAL_MAX_BYTES = 32 * 1024 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 ROLLBACK_MAX_ATTEMPTS = 8
 GROK_COMMAND = "grok"
@@ -316,8 +317,15 @@ class PreservedTree(NamedTuple):
 
 class BackupTransaction(NamedTuple):
     slot: int
+    stage_root: Path
     stage_path: Path
     envelope: dict[str, Any]
+
+
+class BackupCommit(NamedTuple):
+    slot: int | None
+    preserved_files: dict[str, PreservedFile]
+    cleanup_roots: list[Path]
 
 
 class LifecycleSnapshot(NamedTuple):
@@ -1081,18 +1089,15 @@ def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle 
         fail(f"product lock must be a regular owner-private file: {exc}")
     try:
         opened = require_product_lock_descriptor(
-            descriptor, path, allow_recoverable_alias=True
+            descriptor, path, allow_recoverable_alias=exclusive
         )
-        needs_alias_recovery = opened.st_nlink == 2
-        lock_mode = fcntl.LOCK_EX if exclusive or needs_alias_recovery else fcntl.LOCK_SH
+        needs_alias_recovery = exclusive and opened.st_nlink == 2
+        lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(descriptor, lock_mode)
         if needs_alias_recovery:
             recover_anchor_publication_alias(
                 descriptor, path, label="product lock", identity=None
             )
-            if not exclusive:
-                fcntl.flock(descriptor, fcntl.LOCK_SH)
-                lock_mode = fcntl.LOCK_SH
         require_product_lock_descriptor(descriptor, path)
         return ProductLockHandle(
             descriptor=descriptor,
@@ -1141,10 +1146,10 @@ def open_external_target_lock(
         fail(f"target lock must be a regular owner-private file: {exc}")
     try:
         opened = require_bootstrap_lock_descriptor(
-            descriptor, path, identity, allow_recoverable_alias=True
+            descriptor, path, identity, allow_recoverable_alias=exclusive
         )
-        needs_alias_recovery = opened.st_nlink == 2
-        lock_mode = fcntl.LOCK_EX if exclusive or needs_alias_recovery else fcntl.LOCK_SH
+        needs_alias_recovery = exclusive and opened.st_nlink == 2
+        lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         if not blocking:
             lock_mode |= fcntl.LOCK_NB
         try:
@@ -1157,8 +1162,6 @@ def open_external_target_lock(
             recover_anchor_publication_alias(
                 descriptor, path, label="target lock", identity=identity
             )
-            if not exclusive:
-                fcntl.flock(descriptor, fcntl.LOCK_SH)
         require_bootstrap_lock_descriptor(descriptor, path, identity)
         return ExternalTargetLockHandle(
             descriptor=descriptor,
@@ -1814,6 +1817,17 @@ def preservation_stage_root(target: Path, label: str) -> Path:
     return root
 
 
+def cleanup_empty_preservation_stage_root(stage_root: Path) -> None:
+    try:
+        next(stage_root.iterdir())
+    except FileNotFoundError:
+        return
+    except StopIteration:
+        remove_empty_directory_if_created(stage_root, existed_before=False)
+        remove_empty_directory_if_created(stage_root.parent, existed_before=False)
+        remove_empty_directory_if_created(stage_root.parent.parent, existed_before=False)
+
+
 def file_identity_snapshot(
     path: Path,
     *,
@@ -1873,6 +1887,7 @@ def preserve_file_for_rollback(
     )
     moved = False
     try:
+        ensure_cleanup_journal_projected_file_fits(target, stage_root, backup_path, path, snapshot)
         os.replace(path, backup_path)
         moved = True
         fsync_directory(path.parent, f"{label} rollback object removal")
@@ -1882,11 +1897,15 @@ def preserve_file_for_rollback(
         if moved:
             restore_preserved_files_retry({label: entry})
             cleanup_preserved_stage_roots_retry({label: entry})
+        else:
+            cleanup_empty_preservation_stage_root(stage_root)
         fail(f"{label} rollback object preservation failed: {exc}")
     except BaseException:
         if moved:
             restore_preserved_files_retry({label: entry})
             cleanup_preserved_stage_roots_retry({label: entry})
+        else:
+            cleanup_empty_preservation_stage_root(stage_root)
         raise
 
 
@@ -2006,6 +2025,7 @@ def preserve_tree_for_rollback(
         target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
     )
     try:
+        ensure_cleanup_journal_projected_tree_fits(target, stage_root, backup_path, snapshot)
         os.replace(path, backup_path)
         moved = True
         fsync_directory(path.parent, f"{label} tree rollback object removal")
@@ -2015,11 +2035,15 @@ def preserve_tree_for_rollback(
         if moved:
             restore_preserved_trees_retry({label: entry})
             cleanup_preserved_tree_stage_roots_retry({label: entry})
+        else:
+            cleanup_empty_preservation_stage_root(stage_root)
         fail(f"{label} tree rollback object preservation failed: {exc}")
     except BaseException:
         if moved:
             restore_preserved_trees_retry({label: entry})
             cleanup_preserved_tree_stage_roots_retry({label: entry})
+        else:
+            cleanup_empty_preservation_stage_root(stage_root)
         raise
 
 
@@ -2983,6 +3007,13 @@ def cleanup_entry_payload(relative: str, entry: TreeEntry) -> dict[str, Any]:
 def cleanup_root_payload(target: Path, root: Path) -> dict[str, Any]:
     name = cleanup_tombstone_name(target, root)
     snapshot = snapshot_tree(root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone")
+    return cleanup_root_payload_from_snapshot(target, root, snapshot)
+
+
+def cleanup_root_payload_from_snapshot(
+    target: Path, root: Path, snapshot: dict[str, TreeEntry]
+) -> dict[str, Any]:
+    name = cleanup_tombstone_name(target, root)
     if snapshot.get(".", absent_tree_entry()).kind == "absent":
         return {"name": name, "entries": []}
     if len(snapshot) > CLEANUP_MAX_ENTRIES:
@@ -2994,9 +3025,10 @@ def cleanup_root_payload(target: Path, root: Path) -> dict[str, Any]:
     return {"name": name, "entries": entries}
 
 
-def cleanup_journal_payload(target: Path, roots: list[Path]) -> dict[str, Any]:
-    unique_roots = list(dict.fromkeys(roots))
-    if len(unique_roots) > CLEANUP_MAX_ROOTS:
+def cleanup_journal_payload_from_roots(
+    target: Path, root_payloads: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if len(root_payloads) > CLEANUP_MAX_ROOTS:
         fail("cleanup journal exceeds the bounded root limit")
     payload = {
         "schema_version": CLEANUP_JOURNAL_SCHEMA_VERSION,
@@ -3005,7 +3037,7 @@ def cleanup_journal_payload(target: Path, roots: list[Path]) -> dict[str, Any]:
         "canonical_target": str(validate_target(target, create=False)),
         "cleanup_parent": CLEANUP_TOMBSTONE_PARENT_RELATIVE,
         "journal": CLEANUP_JOURNAL_RELATIVE,
-        "roots": [cleanup_root_payload(target, root) for root in unique_roots],
+        "roots": root_payloads,
     }
     if set(payload) != {
         "schema_version",
@@ -3017,7 +3049,81 @@ def cleanup_journal_payload(target: Path, roots: list[Path]) -> dict[str, Any]:
         "roots",
     }:
         fail("cleanup journal schema is invalid")
+    cleanup_journal_canonical_bytes(payload)
     return payload
+
+
+def cleanup_journal_payload(target: Path, roots: list[Path]) -> dict[str, Any]:
+    unique_roots = list(dict.fromkeys(roots))
+    root_payloads = [cleanup_root_payload(target, root) for root in unique_roots]
+    return cleanup_journal_payload_from_roots(target, root_payloads)
+
+
+def cleanup_journal_canonical_bytes(payload: dict[str, Any]) -> bytes:
+    data = canonical_json(payload)
+    if len(data) > CLEANUP_JOURNAL_MAX_BYTES:
+        fail("cleanup journal exceeds the serialized byte limit")
+    return data
+
+
+def cleanup_existing_root_payloads(
+    target: Path, *, replacement: tuple[str, dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    parent = control_tmp_dir(target)
+    by_name: dict[str, dict[str, Any]] = {}
+    if parent.exists() or parent.is_symlink():
+        require_private_directory(parent, "cleanup tombstone parent")
+        for root in sorted(parent.iterdir(), key=lambda item: item.name):
+            name = cleanup_tombstone_name(target, root)
+            by_name[name] = cleanup_root_payload(target, root)
+    if replacement is not None:
+        by_name[replacement[0]] = replacement[1]
+    return [by_name[name] for name in sorted(by_name)]
+
+
+def ensure_cleanup_journal_projected_root_fits(
+    target: Path, root: Path, snapshot: dict[str, TreeEntry]
+) -> None:
+    payload = cleanup_root_payload_from_snapshot(target, root, snapshot)
+    cleanup_journal_payload_from_roots(
+        target, cleanup_existing_root_payloads(target, replacement=(payload["name"], payload))
+    )
+
+
+def ensure_cleanup_journal_projected_file_fits(
+    target: Path,
+    stage_root: Path,
+    backup_path: Path,
+    source_path: Path,
+    snapshot: FileSnapshot,
+) -> None:
+    if snapshot.data is None:
+        return
+    source_info = stat_existing(source_path, "cleanup journal projected file")
+    if source_info is None:
+        fail("cleanup journal projected file disappeared")
+    projected = dict(snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone"))
+    relative = backup_path.relative_to(stage_root).as_posix()
+    if relative in projected:
+        fail("cleanup journal projected file already exists")
+    projected[relative] = tree_entry_from_stat("file", source_info, snapshot.data)
+    ensure_cleanup_journal_projected_root_fits(target, stage_root, projected)
+
+
+def ensure_cleanup_journal_projected_tree_fits(
+    target: Path,
+    stage_root: Path,
+    backup_path: Path,
+    snapshot: dict[str, TreeEntry],
+) -> None:
+    projected = dict(snapshot_tree(stage_root, max_bytes=SOFTWARE_MAX_BYTES, label="cleanup tombstone"))
+    prefix = backup_path.relative_to(stage_root).as_posix()
+    for relative, entry in snapshot.items():
+        projected_relative = prefix if relative == "." else f"{prefix}/{relative}"
+        if projected_relative in projected:
+            fail("cleanup journal projected tree already exists")
+        projected[projected_relative] = entry
+    ensure_cleanup_journal_projected_root_fits(target, stage_root, projected)
 
 
 def require_cleanup_scalar(value: Any, label: str) -> int:
@@ -3146,16 +3252,36 @@ def validate_cleanup_journal(target: Path, payload: Any) -> dict[str, Any]:
             cleanup_entry_from_payload(entry)
         if entries and entries[0]["path"] != ".":
             fail("cleanup journal root snapshot must include the root entry first")
+    cleanup_journal_canonical_bytes(payload)
     return payload
 
 
-def read_cleanup_journal_file(target: Path) -> dict[str, Any] | None:
+def read_cleanup_journal_file(
+    target: Path, *, allow_recoverable_publication_alias: bool = False
+) -> dict[str, Any] | None:
     path = cleanup_journal_path(target)
     if not (path.exists() or path.is_symlink()):
         return None
+    if allow_recoverable_publication_alias:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            fail(f"cleanup journal open failed: {exc}")
+        try:
+            payload, _ = cleanup_journal_descriptor_payload(
+                descriptor, path, target, allow_recoverable_alias=True
+            )
+            return payload
+        finally:
+            os.close(descriptor)
     payload = read_json_file(
         path,
-        max_bytes=METADATA_MAX_BYTES,
+        max_bytes=CLEANUP_JOURNAL_MAX_BYTES,
         label=CLEANUP_JOURNAL_NAME,
         expected_mode=OWNER_FILE_MODE,
     )
@@ -3175,7 +3301,7 @@ def cleanup_journal_descriptor_payload(
     require_current_user_owner(info, "cleanup journal")
     if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
         fail(f"cleanup journal must have mode {OWNER_FILE_MODE:04o}")
-    if info.st_size > METADATA_MAX_BYTES:
+    if info.st_size > CLEANUP_JOURNAL_MAX_BYTES:
         fail("cleanup journal is too large")
     if info.st_nlink != 1 and not (allow_recoverable_alias and info.st_nlink == 2):
         fail("cleanup journal has an unknown hardlink count")
@@ -3193,7 +3319,7 @@ def cleanup_journal_descriptor_payload(
         if not chunk:
             break
         total += len(chunk)
-        if total > METADATA_MAX_BYTES:
+        if total > CLEANUP_JOURNAL_MAX_BYTES:
             fail("cleanup journal is too large")
         chunks.append(chunk)
     data = b"".join(chunks)
@@ -3227,21 +3353,7 @@ def recover_cleanup_journal_publication_alias(target: Path) -> None:
         )
         if opened.st_nlink == 1:
             return
-        aliases: list[Path] = []
-        for candidate in sorted(cleanup_root_dir(target).iterdir(), key=lambda item: item.name):
-            if not is_cleanup_journal_temporary_alias(path, candidate):
-                continue
-            info = stat_existing(candidate, "cleanup journal publication alias")
-            if info is None:
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                fail("cleanup journal publication alias must be a regular file")
-            require_current_user_owner(info, "cleanup journal publication alias")
-            if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
-                fail("cleanup journal publication alias does not match the final journal")
-            aliases.append(candidate)
-        if len(aliases) != 1:
-            fail("cleanup journal must have exactly one recoverable publication alias")
+        aliases = cleanup_journal_publication_aliases(target, opened)
         try:
             aliases[0].unlink()
         except OSError as exc:
@@ -3254,6 +3366,33 @@ def recover_cleanup_journal_publication_alias(target: Path) -> None:
         os.close(descriptor)
 
 
+def cleanup_journal_publication_aliases(target: Path, opened: os.stat_result) -> list[Path]:
+    path = cleanup_journal_path(target)
+    aliases: list[Path] = []
+    for candidate in sorted(cleanup_root_dir(target).iterdir(), key=lambda item: item.name):
+        if candidate.name == CLEANUP_JOURNAL_NAME:
+            continue
+        if not is_cleanup_journal_temporary_alias(path, candidate):
+            fail("cleanup root contains incomplete or unknown journal state")
+        info = stat_existing(candidate, "cleanup journal publication alias")
+        if info is None:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail("cleanup journal publication alias must be a regular file")
+        require_current_user_owner(info, "cleanup journal publication alias")
+        if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+            fail(f"cleanup journal publication alias must have mode {OWNER_FILE_MODE:04o}")
+        if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            fail("cleanup journal publication alias does not match the final journal")
+        aliases.append(candidate)
+    if opened.st_nlink == 2:
+        if len(aliases) != 1:
+            fail("cleanup journal must have exactly one recoverable publication alias")
+    elif aliases:
+        fail("cleanup root contains incomplete or unknown journal state")
+    return aliases
+
+
 def cleanup_namespace_journal_entries(target: Path) -> list[Path]:
     root = cleanup_root_dir(target)
     if not (root.exists() or root.is_symlink()):
@@ -3262,14 +3401,31 @@ def cleanup_namespace_journal_entries(target: Path) -> list[Path]:
     return sorted(root.iterdir(), key=lambda item: item.name)
 
 
-def validate_cleanup_namespace(target: Path, journal: dict[str, Any] | None) -> None:
+def validate_cleanup_namespace(
+    target: Path,
+    journal: dict[str, Any] | None,
+    *,
+    allow_recoverable_publication_alias: bool = False,
+) -> None:
     entries = cleanup_namespace_journal_entries(target)
     names = [entry.name for entry in entries]
     if journal is None:
         if names:
             fail("cleanup root contains incomplete or unknown journal state")
-    elif names != [CLEANUP_JOURNAL_NAME]:
-        fail("cleanup root contains incomplete or unknown journal state")
+    else:
+        path = cleanup_journal_path(target)
+        info = stat_existing(path, CLEANUP_JOURNAL_NAME)
+        if info is None:
+            fail("cleanup journal disappeared while validating cleanup namespace")
+        if not stat.S_ISREG(info.st_mode):
+            fail("cleanup journal must be a regular file")
+        if allow_recoverable_publication_alias:
+            aliases = cleanup_journal_publication_aliases(target, info)
+            expected_names = sorted([CLEANUP_JOURNAL_NAME, *(alias.name for alias in aliases)])
+            if names != expected_names:
+                fail("cleanup root contains incomplete or unknown journal state")
+        elif names != [CLEANUP_JOURNAL_NAME]:
+            fail("cleanup root contains incomplete or unknown journal state")
     declared = {root["name"] for root in journal["roots"]} if journal is not None else set()
     parent = control_tmp_dir(target)
     if not (parent.exists() or parent.is_symlink()):
@@ -3300,15 +3456,25 @@ def validate_cleanup_tombstones(target: Path, journal: dict[str, Any]) -> None:
             validate_cleanup_tombstone_entry_present(path, root, entry, entries_by_path)
 
 
-def read_cleanup_journal(target: Path) -> dict[str, Any] | None:
-    journal = read_cleanup_journal_file(target)
-    validate_cleanup_namespace(target, journal)
+def read_cleanup_journal(
+    target: Path, *, allow_recoverable_publication_alias: bool = False
+) -> dict[str, Any] | None:
+    journal = read_cleanup_journal_file(
+        target, allow_recoverable_publication_alias=allow_recoverable_publication_alias
+    )
+    validate_cleanup_namespace(
+        target,
+        journal,
+        allow_recoverable_publication_alias=allow_recoverable_publication_alias,
+    )
     if journal is not None:
         validate_cleanup_tombstones(target, journal)
     return journal
 
 
-def cleanup_pending_metadata(target: Path) -> dict[str, Any]:
+def cleanup_pending_metadata(
+    target: Path, *, allow_recoverable_publication_alias: bool = False
+) -> dict[str, Any]:
     base = {
         "cleanup_pending": False,
         "cleanup_pending_roots": 0,
@@ -3317,7 +3483,9 @@ def cleanup_pending_metadata(target: Path) -> dict[str, Any]:
     if not target.exists() and not target.is_symlink():
         return base
     require_private_directory(target, "target")
-    journal = read_cleanup_journal(target)
+    journal = read_cleanup_journal(
+        target, allow_recoverable_publication_alias=allow_recoverable_publication_alias
+    )
     if journal is None:
         return base
     return {
@@ -3332,7 +3500,7 @@ def cleanup_pending(target: Path) -> bool:
 
 
 def require_valid_pending_cleanup_after_failure(target: Path) -> None:
-    metadata = cleanup_pending_metadata(target)
+    metadata = cleanup_pending_metadata(target, allow_recoverable_publication_alias=True)
     if not metadata["cleanup_pending"]:
         fail("cleanup journal is not pending after cleanup failure")
 
@@ -3360,12 +3528,12 @@ def write_cleanup_journal(target: Path, roots: list[Path]) -> bool:
     if not roots:
         return True
     ensure_private_directory(managed_control_dir(target), "NDDev control root")
-    ensure_private_directory(cleanup_root_dir(target), "cleanup root")
     payload = cleanup_journal_payload(target, roots)
-    data = canonical_json(payload)
+    data = cleanup_journal_canonical_bytes(payload)
     path = cleanup_journal_path(target)
     if path.exists() or path.is_symlink():
         fail("cleanup journal is already pending")
+    ensure_private_directory(cleanup_root_dir(target), "cleanup root")
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
@@ -3558,6 +3726,7 @@ def collect_cleanup_roots(
     *,
     preserved_files: dict[str, PreservedFile],
     preserved_trees: dict[str, PreservedTree] | None = None,
+    extra_roots: list[Path] | tuple[Path, ...] | None = None,
 ) -> list[Path]:
     roots: list[Path] = []
     roots.extend(entry.stage_root for entry in preserved_files.values())
@@ -3565,6 +3734,7 @@ def collect_cleanup_roots(
         roots.extend(
             entry.stage_root for entry in preserved_trees.values() if entry.stage_root is not None
         )
+    roots.extend(extra_roots or ())
     return [
         root
         for root in dict.fromkeys(roots)
@@ -3987,9 +4157,9 @@ def begin_backup_transaction(target: Path, stamp: dict[str, Any]) -> BackupTrans
     envelope = build_backup_envelope(target, stamp, slot)
     require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
     ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
-    stage_path = control_tmp_dir(target) / (
-        f"backup.{slot}.{os.getpid()}.{time.time_ns()}.{BACKUP_NAME}"
-    )
+    stage_root = control_tmp_dir(target) / f"backup.{slot}.{os.getpid()}.{time.time_ns()}"
+    ensure_private_directory(stage_root, "backup stage root")
+    stage_path = stage_root / BACKUP_NAME
     replace_file_durable(
         stage_path,
         canonical_json(envelope),
@@ -4007,16 +4177,18 @@ def begin_backup_transaction(target: Path, stamp: dict[str, Any]) -> BackupTrans
         expected_mode=OWNER_FILE_MODE,
     )
     validate_backup_envelope(target, slot, written)
-    return BackupTransaction(slot=slot, stage_path=stage_path, envelope=envelope)
+    return BackupTransaction(slot=slot, stage_root=stage_root, stage_path=stage_path, envelope=envelope)
 
 
 def cleanup_backup_transaction_stage(transaction: BackupTransaction) -> None:
-    remove_file_until_absent_retry(transaction.stage_path, "backup stage cleanup")
+    remove_tree_until_absent_retry(
+        transaction.stage_root, max_bytes=METADATA_MAX_BYTES, label="backup stage cleanup"
+    )
 
 
-def commit_backup_transaction(target: Path, transaction: BackupTransaction | None) -> int | None:
+def commit_backup_transaction(target: Path, transaction: BackupTransaction | None) -> BackupCommit:
     if transaction is None:
-        return None
+        return BackupCommit(None, {}, [])
     pool = backup_pool(target)
     require_control_directory(pool.parent, "NDDev control root", allow_locked=False)
     ensure_private_directory(pool, "backup pool")
@@ -4047,9 +4219,15 @@ def commit_backup_transaction(target: Path, transaction: BackupTransaction | Non
             fail("committed backup bytes do not match the staged envelope")
         written = decode_json_bytes(actual, BACKUP_NAME)
         validate_backup_envelope(target, transaction.slot, written)
-        cleanup_backup_transaction_stage(transaction)
-        cleanup_preserved_stage_roots_retry(preserved)
-        return transaction.slot
+        return BackupCommit(
+            transaction.slot,
+            preserved,
+            collect_cleanup_roots(
+                target,
+                preserved_files=preserved,
+                extra_roots=[transaction.stage_root],
+            ),
+        )
     except BaseException:
         restore_preserved_files_retry(preserved)
         cleanup_preserved_stage_roots_retry(preserved)
@@ -4065,10 +4243,18 @@ def rollback_backup_transaction(target: Path, transaction: BackupTransaction | N
 
 def create_backup(target: Path, stamp: dict[str, Any]) -> int:
     transaction = begin_backup_transaction(target, stamp)
-    slot = commit_backup_transaction(target, transaction)
-    if slot is None:
+    commit = commit_backup_transaction(target, transaction)
+    if commit.slot is None:
         fail("backup transaction did not commit")
-    return slot
+    finish_journaled_cleanup(
+        target,
+        commit.cleanup_roots,
+        lambda: (
+            cleanup_backup_transaction_stage(transaction),
+            cleanup_preserved_stage_roots_retry(commit.preserved_files),
+        ),
+    )
+    return commit.slot
 
 
 def decode_backup_payload(relative: str, encoded: Any) -> bytes:
@@ -4352,6 +4538,7 @@ def write_setup(
             extra_paths=sorted(current["managed_files"]) if current is not None else None,
         )
         cleanup_pending_result = False
+        backup_commit = BackupCommit(None, {}, [])
         try:
             backup_transaction = None
             if current is not None and (
@@ -4373,15 +4560,26 @@ def write_setup(
             atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
             prune_empty_managed_dirs(target)
             validate_intended_setup_state(target, desired_stamp, files)
-            backup_slot = commit_backup_transaction(target, backup_transaction)
+            backup_commit = commit_backup_transaction(target, backup_transaction)
             cleanup_pending_result = finish_journaled_cleanup(
                 target,
-                collect_cleanup_roots(target, preserved_files=snapshot.preserved_files),
-                lambda: cleanup_preserved_stage_roots_retry(snapshot.preserved_files),
+                collect_cleanup_roots(
+                    target,
+                    preserved_files=snapshot.preserved_files,
+                    extra_roots=backup_commit.cleanup_roots,
+                ),
+                lambda: (
+                    cleanup_preserved_stage_roots_retry(snapshot.preserved_files),
+                    cleanup_preserved_stage_roots_retry(backup_commit.preserved_files),
+                    cleanup_backup_transaction_stage(backup_transaction)
+                    if backup_transaction is not None
+                    else None,
+                ),
             )
         except PostCommitCleanupError:
             raise
         except BaseException:
+            restore_preserved_files_retry(backup_commit.preserved_files)
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
         return {
@@ -4389,7 +4587,7 @@ def write_setup(
             "profile_id": profile["id"],
             "changed": changed,
             "removed": removed,
-            "backup_slot": backup_slot,
+            "backup_slot": backup_commit.slot,
             "cleanup_pending": cleanup_pending_result,
             "target": str(validate_target(target, create=False)),
         }
@@ -4485,6 +4683,7 @@ def migrate_setup(
             extra_paths=sorted(current["managed_files"]),
         )
         cleanup_pending_result = False
+        backup_commit = BackupCommit(None, {}, [])
         try:
             backup_transaction = begin_backup_transaction(target, current)
             snapshot = snapshot._replace(
@@ -4501,15 +4700,24 @@ def migrate_setup(
             atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
             prune_empty_managed_dirs(target)
             validate_intended_setup_state(target, desired_stamp, files)
-            backup_slot = commit_backup_transaction(target, backup_transaction)
+            backup_commit = commit_backup_transaction(target, backup_transaction)
             cleanup_pending_result = finish_journaled_cleanup(
                 target,
-                collect_cleanup_roots(target, preserved_files=snapshot.preserved_files),
-                lambda: cleanup_preserved_stage_roots_retry(snapshot.preserved_files),
+                collect_cleanup_roots(
+                    target,
+                    preserved_files=snapshot.preserved_files,
+                    extra_roots=backup_commit.cleanup_roots,
+                ),
+                lambda: (
+                    cleanup_preserved_stage_roots_retry(snapshot.preserved_files),
+                    cleanup_preserved_stage_roots_retry(backup_commit.preserved_files),
+                    cleanup_backup_transaction_stage(backup_transaction),
+                ),
             )
         except PostCommitCleanupError:
             raise
         except BaseException:
+            restore_preserved_files_retry(backup_commit.preserved_files)
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
         return {
@@ -4518,7 +4726,7 @@ def migrate_setup(
             "source_legacy_setup_id": current["setup_id"],
             "changed": changed,
             "removed": removed,
-            "backup_slot": backup_slot,
+            "backup_slot": backup_commit.slot,
             "cleanup_pending": cleanup_pending_result,
             "target": str(validate_target(target, create=False)),
         }
@@ -4838,7 +5046,7 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
     data = read_software_file(path, f"Grok Build managed binary {path}")
     if sha256_bytes(data) != expected_sha256:
         fail("Grok Build managed binary digest changed before launch")
-    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
+    ensure_private_directory(managed_control_dir(target), "NDDev control root")
     ensure_private_directory(launch_image_dir(target), "Grok Build launch image directory")
     temporary_descriptor, temporary_name = tempfile.mkstemp(
         prefix="launch.", dir=str(launch_image_dir(target))
@@ -5107,7 +5315,7 @@ def software_present_paths_from_snapshot(snapshot: SoftwareSnapshot) -> list[str
 
 
 def validate_intended_software_state(target: Path, stamp_bytes: bytes, binary: bytes) -> None:
-    final_status = software_status_locked(target)
+    final_status = software_status_locked(target, validate_cleanup=False)
     if not final_status["installed"]:
         fail(
             "Grok Build software install did not produce structurally complete target-owned software"
@@ -5369,9 +5577,17 @@ def software_status(target: Path) -> dict[str, Any]:
         return software_status_locked(target)
 
 
-def software_status_locked(target: Path) -> dict[str, Any]:
+def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> dict[str, Any]:
     canonical = validate_target(target, create=False)
-    pending_cleanup = cleanup_pending_metadata(canonical)
+    pending_cleanup = (
+        cleanup_pending_metadata(canonical)
+        if validate_cleanup
+        else {
+            "cleanup_pending": False,
+            "cleanup_pending_roots": 0,
+            "cleanup_pending_entries": 0,
+        }
+    )
     base: dict[str, Any] = {
         "schema_version": 1,
         "command": "software-status",
@@ -5683,7 +5899,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
             except BaseException:
                 restore_software_snapshot_retry(target, snapshot)
                 raise
-            final_status = software_status_locked(target)
+            final_status = software_status_locked(target, validate_cleanup=not cleanup_pending_result)
             return {
                 "schema_version": 1,
                 "command": command,

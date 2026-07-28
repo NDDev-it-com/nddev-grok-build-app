@@ -76,6 +76,7 @@ NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
 METADATA_MAX_BYTES = 256 * 1024
+CLEANUP_JOURNAL_MAX_BYTES = 32 * 1024 * 1024
 SOFTWARE_LIFECYCLE_KEYS = {
     "channel",
     "command",
@@ -615,14 +616,13 @@ def validate_clean_archive_cache_smoke() -> None:
             (scratch / directory).mkdir(mode=0o700)
         manager = load_manager_module()
         status_target = scratch / "targets" / "grok-home"
-        bootstrap_before = bootstrap_artifact_snapshot(manager)
-        commands = [
-            [
-                sys.executable,
-                "-B",
-                "cli-tools/validate_public_contracts.py",
-                "--skip-archive-smoke",
-            ],
+        validator_command = [
+            sys.executable,
+            "-B",
+            "cli-tools/validate_public_contracts.py",
+            "--skip-archive-smoke",
+        ]
+        read_only_commands = [
             [sys.executable, "-B", "cli-tools/nddev_grok_build.py", "--help"],
             [sys.executable, "-B", "cli-tools/nddev_grok_build.py", "list", "--json"],
             [
@@ -657,11 +657,15 @@ def validate_clean_archive_cache_smoke() -> None:
                 "--json",
             ],
         ]
-        for command in commands:
+        for command in read_only_commands:
+            bootstrap_before = bootstrap_artifact_snapshot(manager)
             run_archive_command(archive, command, env)
             validate_no_python_caches(archive)
-        if bootstrap_artifact_snapshot(manager) != bootstrap_before:
-            raise ValueError("archive cache smoke left bootstrap lock residue")
+            if bootstrap_artifact_snapshot(manager) != bootstrap_before:
+                raise ValueError("read-only archive command left bootstrap lock residue")
+        run_archive_command(archive, validator_command, env)
+        validate_no_python_caches(archive)
+        validate_no_bootstrap_publication_aliases(manager)
 
 
 def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
@@ -1271,22 +1275,24 @@ def validate_anchor_recovery_smokes(manager: Any, target: Path) -> None:
     product_anchor = manager.product_anchor_path(product_root)
     target_anchor = manager.bootstrap_lock_path(identity)
 
-    for anchor, recover in (
-        (product_anchor, lambda: manager.status_payload(target)),
-        (
-            target_anchor,
-            lambda: manager.release_bootstrap_lock(manager.acquire_bootstrap_lock(target)),
-        ),
-    ):
+    for anchor in (product_anchor, target_anchor):
         before = anchor.lstat()
         alias = anchor.with_name(f".{anchor.name}.123.456.tmp")
         os.link(anchor, alias)
         if anchor.lstat().st_nlink != 2:
             raise ValueError("anchor recovery setup did not create a hardlink alias")
-        recover()
+        expect_manager_error(manager, lambda: manager.status_payload(target), "hardlink count")
+        unchanged = anchor.lstat()
+        if not (alias.exists() or alias.is_symlink()):
+            raise ValueError("read-only anchor validation removed a publication alias")
+        if unchanged.st_nlink != 2:
+            raise ValueError("read-only anchor validation changed the hardlink count")
+        if (unchanged.st_dev, unchanged.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("read-only anchor validation changed the final anchor inode")
+        manager.release_bootstrap_lock(manager.acquire_bootstrap_lock(target))
         after = anchor.lstat()
         if alias.exists() or alias.is_symlink():
-            raise ValueError("anchor recovery did not remove the publication alias")
+            raise ValueError("mutating anchor recovery did not remove the publication alias")
         if after.st_nlink != 1:
             raise ValueError("anchor recovery did not restore nlink==1")
         if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
@@ -2294,6 +2300,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest cleanup journal alias recovery scope mismatch")
     if transaction.get("cleanup_journal_read_only_recovery") is not False:
         raise ValueError("manifest read-only cleanup journal recovery must be false")
+    if transaction.get("cleanup_journal_serialized_max_bytes") != CLEANUP_JOURNAL_MAX_BYTES:
+        raise ValueError("manifest cleanup journal serialized byte bound mismatch")
     if transaction.get("cleanup_journal_fixed_parent") != "$GROK_HOME/.nddev-grok-build/tmp":
         raise ValueError("manifest cleanup journal fixed parent mismatch")
     if transaction.get("cleanup_journal_path") != (
@@ -2365,6 +2373,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"contract safety must set {key}=true")
     if functionality.get("cleanup_journal_read_only_recovery") is not False:
         raise ValueError("contract safety must disable read-only cleanup journal recovery")
+    if functionality.get("cleanup_journal_serialized_max_bytes") != CLEANUP_JOURNAL_MAX_BYTES:
+        raise ValueError("contract safety cleanup journal serialized byte bound mismatch")
     managed_state = contract.get("managed_state")
     if not isinstance(managed_state, dict):
         raise ValueError("contract managed_state missing")

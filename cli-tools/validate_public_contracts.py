@@ -354,16 +354,24 @@ def validate_manager_source() -> None:
         if marker in source:
             raise ValueError(f"manager source exposes forbidden test switch marker: {marker}")
     for marker in (
+        "import ctypes",
         "O_NOFOLLOW",
         "fcntl.flock",
         "LOCK_PARENT_HELD_MODE = 0o500",
         "IMMUTABLE_EXEC_MODE = 0o500",
         'LOCK_DIR_NAME = "locks"',
+        'PRODUCT_LOCK_FILE_NAME = "global.lock"',
+        'TARGET_LOCK_ROOT_NAME = "target-locks"',
         "BOOTSTRAP_LOCK_NAMESPACE",
+        "RENAME_EXCL_DARWIN",
+        "RENAME_NOREPLACE_LINUX",
+        "def rename_no_replace(",
+        "def write_atomic_anchor(",
         "def bootstrap_system_root()",
         "def acquire_bootstrap_lock(",
+        "def read_lifecycle_payload(",
         "while offset < len(data)",
-        "bootstrap lock binding write made no progress",
+        "binding write made no progress",
     ):
         if marker not in source:
             raise ValueError(f"manager source is missing lock invariant marker: {marker}")
@@ -802,6 +810,10 @@ def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
 def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
     identity = manager.bootstrap_target_identity(target)
     path = manager.bootstrap_lock_path(identity)
+    product = manager.acquire_product_lock(create=True, exclusive=True)
+    if product is None:
+        raise ValueError("product lock was not created for bootstrap binding smoke")
+    manager.release_product_lock(product)
 
     def write_raw_binding(data: bytes) -> None:
         path.parent.mkdir(mode=manager.OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
@@ -869,6 +881,31 @@ def validate_bootstrap_binding_smokes(manager: Any, target: Path) -> None:
         manager.os.write = original_write
     descriptor = manager.acquire_bootstrap_lock(target)
     manager.release_bootstrap_lock(descriptor)
+
+
+def validate_no_replace_publication_smoke(manager: Any) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-no-replace-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(manager.OWNER_DIRECTORY_MODE)
+        path = tmp / manager.PRODUCT_LOCK_FILE_NAME
+        data = manager.expected_product_lock_binding_bytes()
+        if manager.write_atomic_anchor(path, data, manager.OWNER_FILE_MODE, "validator product lock") is not True:
+            raise ValueError("initial no-replace publication did not publish")
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("no-replace publication must create one regular final inode")
+        if stat.S_IMODE(info.st_mode) != manager.OWNER_FILE_MODE:
+            raise ValueError("no-replace publication mode mismatch")
+        if path.read_bytes() != data:
+            raise ValueError("no-replace publication bytes changed")
+        if manager.write_atomic_anchor(
+            path, b"{\"unexpected\":true}\n", manager.OWNER_FILE_MODE, "validator product lock"
+        ) is not False:
+            raise ValueError("no-replace publication overwrote an existing final anchor")
+        if path.read_bytes() != data:
+            raise ValueError("no-replace EEXIST path changed the final anchor")
+        if any(item.name.startswith(f".{path.name}.nddev.tmp.") for item in tmp.iterdir()):
+            raise ValueError("no-replace EEXIST path left a publication temp file")
 
 
 def validate_fetch_error_smokes(manager: Any) -> None:
@@ -1303,10 +1340,19 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest transaction_policy missing")
     if transaction.get("existing_target_mode_required") != "0700":
         raise ValueError("manifest must require existing target mode 0700")
-    if not str(transaction.get("external_bootstrap_lock", "")).startswith(
-        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/"
+    if transaction.get("external_product_lock") != (
+        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/global.lock"
     ):
-        raise ValueError("manifest external bootstrap lock path must use fixed system temp root")
+        raise ValueError("manifest external product lock path mismatch")
+    if transaction.get("external_target_lock_root") != (
+        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/target-locks"
+    ):
+        raise ValueError("manifest external target lock root mismatch")
+    if transaction.get("external_bootstrap_lock") != (
+        "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/"
+        "target-locks/<sha256(namespace+canonical-target)>.lock"
+    ):
+        raise ValueError("manifest external bootstrap lock path must use fixed target lock root")
     if "/private/tmp" not in str(
         transaction.get("external_bootstrap_lock_system_root", "")
     ) or "/tmp" not in str(transaction.get("external_bootstrap_lock_system_root", "")):
@@ -1319,8 +1365,22 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest external bootstrap lock must be persistent")
     if transaction.get("external_bootstrap_lock_unlinked_on_release") is not False:
         raise ValueError("manifest external bootstrap lock must not be unlinked on release")
-    if "JSON" not in str(transaction.get("external_bootstrap_lock_binding", "")):
+    if "complete JSON" not in str(transaction.get("external_bootstrap_lock_binding", "")):
         raise ValueError("manifest external bootstrap lock binding missing")
+    if transaction.get("external_lock_atomic_no_replace") is not True:
+        raise ValueError("manifest external lock must use atomic no-replace publication")
+    if "renameatx_np" not in str(
+        transaction.get("external_lock_no_replace_primitives", "")
+    ) or "renameat2" not in str(transaction.get("external_lock_no_replace_primitives", "")):
+        raise ValueError("manifest external lock primitives mismatch")
+    if transaction.get("external_lock_empty_partial_malformed_fail_closed") is not True:
+        raise ValueError("manifest external lock must fail closed on incomplete anchors")
+    if transaction.get("external_read_only_no_create") is not True:
+        raise ValueError("manifest read-only commands must not create external anchors")
+    if transaction.get("external_read_only_cold_namespace_empty_required") is not True:
+        raise ValueError("manifest cold read namespace rule mismatch")
+    if transaction.get("external_read_only_cold_namespace_identity_retry") is not True:
+        raise ValueError("manifest cold read retry rule mismatch")
     if "resolved real parent" not in str(
         transaction.get("external_bootstrap_lock_target_identity", "")
     ):
@@ -1397,6 +1457,11 @@ def main(argv: list[str] | None = None) -> int:
         "external_bootstrap_lock_uses_fixed_system_temp_root",
         "external_bootstrap_lock_ignores_ambient_tmpdir",
         "external_bootstrap_lock_json_binding",
+        "external_lock_atomic_no_replace",
+        "external_lock_empty_partial_malformed_fail_closed",
+        "external_read_only_no_create",
+        "external_read_only_cold_namespace_empty_required",
+        "external_read_only_cold_namespace_identity_retry",
         "external_lock_acquired_before_target_inspection",
         "external_lock_released_after_internal_lock",
         "external_lock_not_exposed_to_child_env",
@@ -1516,6 +1581,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
     with isolated_bootstrap_root(manager):
+        validate_no_replace_publication_smoke(manager)
         validate_adversarial_smokes(manager)
         validate_fetch_error_smokes(manager)
     validate_workflows()

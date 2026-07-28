@@ -10,6 +10,6 @@
   "grok_build_installer": "https://x.ai/cli/install.sh",
   "grok_build_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
   "nddev_builder_plugin_version": "0.2.0",
-  "python_requires": ">=3.10",
+  "python_requires": ">=3.9",
   "runtime_baseline_ref": "references/grok-build-baseline.json"
 }

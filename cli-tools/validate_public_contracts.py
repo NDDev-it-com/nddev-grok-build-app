@@ -463,6 +463,14 @@ def validate_manager_source() -> None:
         "def lexical_target_identity(",
         "def external_lifecycle_coordination(",
         "def acquire_bootstrap_lock_handle_for_identity(",
+        "class TreeEntry(",
+        "class PreservedTree(",
+        "def tree_entry_from_stat(",
+        "def preserve_tree_for_rollback(",
+        "def validate_backup_slot_topology(",
+        "validate_backup_slot_topology(envelope_path",
+        "lock_parent: dict[str, TreeEntry]",
+        "snapshot.lock_parent",
         "def require_command_supported_host(",
         "def remove_grok_software(",
         "def restore_lifecycle_snapshot_retry(",
@@ -2074,6 +2082,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("CHANGELOG.md must document the current public version")
     if build.get("build_version") != version or manifest.get("build_version") != version:
         raise ValueError("build version fields are not synchronized")
+    if build.get("python_requires") != ">=3.9":
+        raise ValueError("build/version.json python_requires must be >=3.9")
     if contract.get("version_ref") != "build/version.json":
         raise ValueError("contract version_ref must point at build/version.json")
     if contract.get("manifest_ref") != "build/manifest.json":

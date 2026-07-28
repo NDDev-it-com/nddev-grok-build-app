@@ -277,6 +277,21 @@ class TreeEntry(NamedTuple):
     kind: str
     mode: int | None
     data: bytes | None
+    size: int | None = None
+    dev: int | None = None
+    ino: int | None = None
+    mtime_ns: int | None = None
+
+
+class PreservedTree(NamedTuple):
+    target: Path
+    path: Path
+    label: str
+    max_bytes: int
+    snapshot: dict[str, TreeEntry]
+    stage_root: Path | None
+    parent_mtime_ns: int | None
+    backup_path: Path | None
 
 
 class BackupTransaction(NamedTuple):
@@ -287,19 +302,24 @@ class BackupTransaction(NamedTuple):
 
 class LifecycleSnapshot(NamedTuple):
     files: dict[str, FileSnapshot]
+    control_root_dir: TreeEntry
     backup_pool: dict[str, TreeEntry]
     control_tmp: dict[str, TreeEntry]
+    lock_parent: dict[str, TreeEntry]
     launch_images: dict[str, TreeEntry]
     preserved_files: dict[str, PreservedFile]
 
 
 class SoftwareSnapshot(NamedTuple):
+    control_root_dir: TreeEntry
     software_root: dict[str, TreeEntry]
     software_container_dir: TreeEntry
     managed_binary: FileSnapshot
     managed_bin_dir: TreeEntry
     control_tmp: dict[str, TreeEntry]
+    lock_parent: dict[str, TreeEntry]
     preserved_files: dict[str, PreservedFile]
+    preserved_trees: dict[str, PreservedTree]
 
 
 class BootstrapLockHandle(NamedTuple):
@@ -1084,6 +1104,26 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
     return internal
 
 
+def validate_backup_slot_topology(envelope_path: Path, label: str) -> None:
+    slot_dir = envelope_path.parent
+    pool = slot_dir.parent
+    require_private_directory(pool, f"{label} pool")
+    require_private_directory(slot_dir, f"{label} slot")
+    entries = sorted(slot_dir.iterdir(), key=lambda item: item.name)
+    if [entry.name for entry in entries] != [BACKUP_NAME]:
+        fail(f"{label} slot must contain exactly {BACKUP_NAME}")
+    envelope_info = require_existing_managed_file(
+        envelope_path,
+        BACKUP_NAME,
+        max_bytes=METADATA_MAX_BYTES,
+        expected_mode=OWNER_FILE_MODE,
+    )
+    if envelope_info is None:
+        fail(f"{label} envelope is missing")
+    if envelope_info.st_nlink != 1:
+        fail(f"{label} envelope must not be a hardlink")
+
+
 @contextlib.contextmanager
 def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
     created_parent_chain: list[Path] = []
@@ -1567,6 +1607,7 @@ def restore_parent_mtime(entry: PreservedFile) -> None:
             ns=(int(current.st_atime_ns), entry.parent_mtime_ns),
             follow_symlinks=False,
         )
+        fsync_directory(entry.path.parent, f"{entry.label} parent mtime restore")
 
 
 def restore_preserved_file_once(entry: PreservedFile) -> None:
@@ -1631,6 +1672,109 @@ def cleanup_preserved_stage_roots_retry(entries: dict[str, PreservedFile]) -> No
     roots = {entry.stage_root for entry in entries.values()}
     for root in roots:
         cleanup_preserved_files_retry(entries, root)
+
+
+def preserve_tree_for_rollback(
+    target: Path,
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> PreservedTree:
+    parent_mtime_ns = None
+    with contextlib.suppress(OSError):
+        parent_mtime_ns = int(path.parent.lstat().st_mtime_ns)
+    snapshot = snapshot_tree(path, max_bytes=max_bytes, label=label)
+    if snapshot.get(".", absent_tree_entry()).kind == "absent":
+        return PreservedTree(target, path, label, max_bytes, snapshot, None, parent_mtime_ns, None)
+    stage_root = preservation_stage_root(target, f"{label} tree rollback")
+    backup_path = stage_root / sha256_bytes(str(path).encode("utf-8"))
+    if backup_path.exists() or backup_path.is_symlink():
+        fail(f"{label} tree rollback object already exists")
+    moved = False
+    entry = PreservedTree(
+        target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
+    )
+    try:
+        os.replace(path, backup_path)
+        moved = True
+        fsync_directory(path.parent, f"{label} tree rollback object removal")
+        fsync_directory(stage_root, f"{label} tree rollback object preservation")
+        return entry
+    except OSError as exc:
+        if moved:
+            restore_preserved_trees_retry({label: entry})
+            cleanup_preserved_tree_stage_roots_retry({label: entry})
+        fail(f"{label} tree rollback object preservation failed: {exc}")
+    except BaseException:
+        if moved:
+            restore_preserved_trees_retry({label: entry})
+            cleanup_preserved_tree_stage_roots_retry({label: entry})
+        raise
+
+
+def restore_preserved_tree_once(entry: PreservedTree) -> None:
+    if entry.snapshot.get(".", absent_tree_entry()).kind == "absent":
+        remove_tree_until_absent_retry(entry.path, max_bytes=entry.max_bytes, label=entry.label)
+        restore_tree_parent_mtime(entry)
+        return
+    if tree_matches_snapshot(
+        entry.path, entry.snapshot, max_bytes=entry.max_bytes, label=entry.label
+    ):
+        fsync_directory(entry.path.parent, f"{entry.label} tree rollback")
+        restore_tree_parent_mtime(entry)
+        return
+    if entry.backup_path is None:
+        fail(f"{entry.label} tree rollback object is missing")
+    if entry.path.exists() or entry.path.is_symlink():
+        remove_tree_until_absent_retry(
+            entry.path, max_bytes=entry.max_bytes, label=f"{entry.label} tree replacement"
+        )
+    ensure_private_parent(entry.path, entry.target)
+    if not (entry.backup_path.exists() or entry.backup_path.is_symlink()):
+        fail(f"{entry.label} tree rollback object disappeared")
+    try:
+        os.replace(entry.backup_path, entry.path)
+    except OSError as exc:
+        fail(f"{entry.label} tree rollback object restore failed: {exc}")
+    fsync_directory(entry.path.parent, f"{entry.label} tree rollback restore")
+    restore_tree_parent_mtime(entry)
+
+
+def restore_tree_parent_mtime(entry: PreservedTree) -> None:
+    if entry.parent_mtime_ns is None:
+        return
+    with contextlib.suppress(OSError):
+        current = entry.path.parent.lstat()
+        os.utime(
+            entry.path.parent,
+            ns=(int(current.st_atime_ns), entry.parent_mtime_ns),
+            follow_symlinks=False,
+        )
+        fsync_directory(entry.path.parent, f"{entry.label} tree parent mtime restore")
+
+
+def restore_preserved_trees_retry(entries: dict[str, PreservedTree]) -> None:
+    for key in reversed(tuple(entries)):
+        entry = entries[key]
+        retry_until_exact(
+            f"{entry.label} tree object rollback",
+            lambda item=entry: tree_matches_snapshot(
+                item.path,
+                item.snapshot,
+                max_bytes=item.max_bytes,
+                label=item.label,
+            ),
+            lambda item=entry: restore_preserved_tree_once(item),
+        )
+
+
+def cleanup_preserved_tree_stage_roots_retry(entries: dict[str, PreservedTree]) -> None:
+    roots = {entry.stage_root for entry in entries.values() if entry.stage_root is not None}
+    for root in roots:
+        remove_tree_until_absent_retry(
+            root, max_bytes=SOFTWARE_MAX_BYTES, label="tree rollback object store"
+        )
 
 
 def restore_atomic_replace_snapshot_retry(
@@ -2377,16 +2521,32 @@ def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
     )
 
 
+def absent_tree_entry() -> TreeEntry:
+    return TreeEntry("absent", None, None)
+
+
+def tree_entry_from_stat(kind: str, info: os.stat_result, data: bytes | None) -> TreeEntry:
+    return TreeEntry(
+        kind,
+        stat.S_IMODE(info.st_mode),
+        data,
+        int(info.st_size),
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mtime_ns),
+    )
+
+
 def snapshot_tree(root: Path, *, max_bytes: int, label: str) -> dict[str, TreeEntry]:
     if not root.exists() and not root.is_symlink():
-        return {".": TreeEntry("absent", None, None)}
+        return {".": absent_tree_entry()}
     info = stat_existing(root, label)
     if info is None:
-        return {".": TreeEntry("absent", None, None)}
+        return {".": absent_tree_entry()}
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
     require_current_user_owner(info, label)
-    entries: dict[str, TreeEntry] = {".": TreeEntry("dir", stat.S_IMODE(info.st_mode), None)}
+    entries: dict[str, TreeEntry] = {".": tree_entry_from_stat("dir", info, None)}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         path_info = stat_existing(path, f"{label}/{relative}")
@@ -2394,14 +2554,24 @@ def snapshot_tree(root: Path, *, max_bytes: int, label: str) -> dict[str, TreeEn
             continue
         if stat.S_ISDIR(path_info.st_mode):
             require_current_user_owner(path_info, f"{label}/{relative}")
-            entries[relative] = TreeEntry("dir", stat.S_IMODE(path_info.st_mode), None)
+            entries[relative] = tree_entry_from_stat("dir", path_info, None)
             continue
         if not stat.S_ISREG(path_info.st_mode):
             fail(f"{label}/{relative} must be a regular file or directory")
         data = read_existing_file(path, max_bytes=max_bytes, label=f"{label}/{relative}")
         if data is None:
             fail(f"{label}/{relative} disappeared while snapshotting")
-        entries[relative] = TreeEntry("file", stat.S_IMODE(path_info.st_mode), data)
+        final_info = stat_existing(path, f"{label}/{relative}")
+        if final_info is None:
+            fail(f"{label}/{relative} disappeared while snapshotting")
+        if (
+            final_info.st_dev,
+            final_info.st_ino,
+            final_info.st_size,
+            final_info.st_mtime_ns,
+        ) != (path_info.st_dev, path_info.st_ino, path_info.st_size, path_info.st_mtime_ns):
+            fail(f"{label}/{relative} changed while snapshotting")
+        entries[relative] = tree_entry_from_stat("file", path_info, data)
     return entries
 
 
@@ -2414,11 +2584,11 @@ def tree_matches_snapshot(
 def snapshot_directory_entry(path: Path, label: str) -> TreeEntry:
     info = stat_existing(path, label)
     if info is None:
-        return TreeEntry("absent", None, None)
+        return absent_tree_entry()
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
     require_current_user_owner(info, label)
-    return TreeEntry("dir", stat.S_IMODE(info.st_mode), None)
+    return tree_entry_from_stat("dir", info, None)
 
 
 def directory_entry_matches(path: Path, entry: TreeEntry, label: str) -> bool:
@@ -2428,7 +2598,13 @@ def directory_entry_matches(path: Path, entry: TreeEntry, label: str) -> bool:
     if info is None or not stat.S_ISDIR(info.st_mode):
         return False
     require_current_user_owner(info, label)
-    return stat.S_IMODE(info.st_mode) == entry.mode
+    return (
+        stat.S_IMODE(info.st_mode) == entry.mode
+        and int(info.st_size) == entry.size
+        and int(info.st_dev) == entry.dev
+        and int(info.st_ino) == entry.ino
+        and int(info.st_mtime_ns) == entry.mtime_ns
+    )
 
 
 def ensure_directory_entry(path: Path, entry: TreeEntry, label: str) -> None:
@@ -2442,16 +2618,18 @@ def ensure_directory_entry(path: Path, entry: TreeEntry, label: str) -> None:
         fail(f"{label} snapshot is invalid")
     info = stat_existing(path, label)
     if info is None:
-        path.mkdir(mode=entry.mode)
-        path.chmod(entry.mode)
-        fsync_directory(path.parent, label)
-        return
+        fail(f"{label} exact directory object is missing")
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
     require_current_user_owner(info, label)
+    if entry.dev is not None and info.st_dev != entry.dev:
+        fail(f"{label} directory device changed")
+    if entry.ino is not None and info.st_ino != entry.ino:
+        fail(f"{label} directory inode changed")
     if stat.S_IMODE(info.st_mode) != entry.mode:
         path.chmod(entry.mode)
         fsync_directory(path, label)
+    restore_tree_entry_mtime(path, entry, label)
 
 
 def tree_path(root: Path, relative: str) -> Path:
@@ -2473,20 +2651,115 @@ def remove_tree_once(root: Path, *, max_bytes: int, label: str) -> None:
             durable_rmdir(path, f"{label}/{relative}")
 
 
-def ensure_tree_dir(path: Path, mode: int, label: str) -> None:
+def remove_tree_until_absent_retry(root: Path, *, max_bytes: int, label: str) -> None:
+    retry_until_exact(
+        label,
+        lambda: not (root.exists() or root.is_symlink()),
+        lambda: remove_tree_once(root, max_bytes=max_bytes, label=label),
+    )
+
+
+def fsync_file(path: Path, label: str) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} fsync open failed: {exc}")
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        fail(f"{label} fsync failed: {exc}")
+    finally:
+        os.close(descriptor)
+
+
+def restore_tree_entry_mtime(path: Path, entry: TreeEntry, label: str) -> None:
+    if entry.mtime_ns is None:
+        return
+    info = path.lstat()
+    if info.st_mtime_ns == entry.mtime_ns:
+        return
+    os.utime(
+        path,
+        ns=(int(info.st_atime_ns), int(entry.mtime_ns)),
+        follow_symlinks=False,
+    )
+    if stat.S_ISDIR(info.st_mode):
+        fsync_directory(path, f"{label} mtime restore")
+    else:
+        fsync_file(path, f"{label} mtime restore")
+
+
+def require_same_tree_object(path: Path, entry: TreeEntry, label: str) -> os.stat_result:
     info = stat_existing(path, label)
     if info is None:
-        create_missing_directories(missing_directory_chain(path.parent))
-        path.mkdir(mode=mode)
-        path.chmod(mode)
-        fsync_directory(path.parent, label)
-        return
+        fail(f"{label} exact tree object is missing")
+    if entry.dev is not None and info.st_dev != entry.dev:
+        fail(f"{label} device changed")
+    if entry.ino is not None and info.st_ino != entry.ino:
+        fail(f"{label} inode changed")
+    return info
+
+
+def restore_tree_directory_entry(path: Path, entry: TreeEntry, label: str) -> None:
+    if entry.kind != "dir" or entry.mode is None:
+        fail(f"{label} directory snapshot is invalid")
+    info = require_same_tree_object(path, entry, label)
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
     require_current_user_owner(info, label)
-    if stat.S_IMODE(info.st_mode) != mode:
-        path.chmod(mode)
+    if stat.S_IMODE(info.st_mode) != entry.mode:
+        path.chmod(entry.mode)
         fsync_directory(path, label)
+    restore_tree_entry_mtime(path, entry, label)
+
+
+def restore_tree_file_entry(path: Path, entry: TreeEntry, *, max_bytes: int, label: str) -> None:
+    if entry.kind != "file" or entry.mode is None or entry.data is None:
+        fail(f"{label} file snapshot is invalid")
+    info = require_same_tree_object(path, entry, label)
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file")
+    require_current_user_owner(info, label)
+    if info.st_nlink != 1:
+        fail(f"{label} must not be a hardlink")
+    if entry.size is not None and len(entry.data) != entry.size:
+        fail(f"{label} snapshot size does not match bytes")
+    current_data = read_existing_file(path, max_bytes=max_bytes, label=label)
+    if current_data != entry.data:
+        flags = os.O_WRONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            fail(f"{label} exact file restore open failed: {exc}")
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (entry.dev, entry.ino):
+                fail(f"{label} inode changed while restoring")
+            os.ftruncate(descriptor, 0)
+            offset = 0
+            while offset < len(entry.data):
+                written = os.write(descriptor, entry.data[offset:])
+                if written <= 0:
+                    fail(f"{label} exact file restore made no progress")
+                offset += written
+            os.fchmod(descriptor, entry.mode)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    info = require_same_tree_object(path, entry, label)
+    if stat.S_IMODE(info.st_mode) != entry.mode:
+        path.chmod(entry.mode)
+        fsync_file(path, label)
+    restore_tree_entry_mtime(path, entry, label)
 
 
 def restore_tree_once(
@@ -2496,11 +2769,11 @@ def restore_tree_once(
     if root_entry is None:
         fail(f"{label} snapshot is missing the root entry")
     if root_entry.kind == "absent":
-        remove_tree_once(root, max_bytes=max_bytes, label=label)
+        remove_tree_until_absent_retry(root, max_bytes=max_bytes, label=label)
         return
     if root_entry.kind != "dir" or root_entry.mode is None:
         fail(f"{label} snapshot root is invalid")
-    ensure_tree_dir(root, root_entry.mode, label)
+    restore_tree_directory_entry(root, root_entry, label)
     current = snapshot_tree(root, max_bytes=max_bytes, label=label)
     expected_paths = set(snapshot)
     for relative, entry in sorted(
@@ -2517,27 +2790,21 @@ def restore_tree_once(
             durable_unlink(path, f"{label}/{relative}")
         elif entry.kind == "dir":
             durable_rmdir(path, f"{label}/{relative}")
-    for relative, entry in sorted(snapshot.items(), key=lambda item: len(Path(item[0]).parts)):
-        if entry.kind != "dir":
-            continue
-        ensure_tree_dir(
-            tree_path(root, relative), entry.mode or OWNER_DIRECTORY_MODE, f"{label}/{relative}"
-        )
     for relative, entry in sorted(snapshot.items()):
         if entry.kind != "file":
             continue
-        if entry.data is None:
-            fail(f"{label}/{relative} file snapshot is missing bytes")
-        replace_file_durable(
+        restore_tree_file_entry(
             tree_path(root, relative),
-            entry.data,
-            root,
-            mode=entry.mode or OWNER_FILE_MODE,
+            entry,
             max_bytes=max_bytes,
             label=f"{label}/{relative}",
-            ensure_parent=ensure_private_parent,
-            reader=read_existing_file,
         )
+    for relative, entry in sorted(
+        snapshot.items(), key=lambda item: len(Path(item[0]).parts), reverse=True
+    ):
+        if entry.kind != "dir":
+            continue
+        restore_tree_directory_entry(tree_path(root, relative), entry, f"{label}/{relative}")
 
 
 def restore_tree_retry(
@@ -2555,11 +2822,17 @@ def snapshot_lifecycle_state(
     extra_paths: tuple[str, ...] | list[str] | None = None,
     preserve_paths: tuple[str, ...] | list[str] | None = None,
 ) -> LifecycleSnapshot:
+    control_root_snapshot = snapshot_directory_entry(
+        managed_control_dir(target), "NDDev control root"
+    )
     backup_pool_snapshot = snapshot_tree(
         backup_pool(target), max_bytes=METADATA_MAX_BYTES, label="backup pool"
     )
     control_tmp_snapshot = snapshot_tree(
         control_tmp_dir(target), max_bytes=METADATA_MAX_BYTES, label="control tmp"
+    )
+    lock_parent_snapshot = snapshot_tree(
+        lock_parent_dir(target), max_bytes=METADATA_MAX_BYTES, label="target lock parent"
     )
     launch_images_snapshot = snapshot_tree(
         launch_image_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="launch images"
@@ -2572,8 +2845,10 @@ def snapshot_lifecycle_state(
     )
     return LifecycleSnapshot(
         files=files_snapshot,
+        control_root_dir=control_root_snapshot,
         backup_pool=backup_pool_snapshot,
         control_tmp=control_tmp_snapshot,
+        lock_parent=lock_parent_snapshot,
         launch_images=launch_images_snapshot,
         preserved_files=preserved,
     )
@@ -2582,6 +2857,9 @@ def snapshot_lifecycle_state(
 def lifecycle_matches_snapshot(target: Path, snapshot: LifecycleSnapshot) -> bool:
     return (
         managed_files_match_snapshot(target, snapshot.files)
+        and directory_entry_matches(
+            managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
+        )
         and tree_matches_snapshot(
             backup_pool(target),
             snapshot.backup_pool,
@@ -2593,6 +2871,12 @@ def lifecycle_matches_snapshot(target: Path, snapshot: LifecycleSnapshot) -> boo
             snapshot.control_tmp,
             max_bytes=METADATA_MAX_BYTES,
             label="control tmp",
+        )
+        and tree_matches_snapshot(
+            lock_parent_dir(target),
+            snapshot.lock_parent,
+            max_bytes=METADATA_MAX_BYTES,
+            label="target lock parent",
         )
         and tree_matches_snapshot(
             launch_image_dir(target),
@@ -2616,10 +2900,19 @@ def restore_lifecycle_snapshot_once(target: Path, snapshot: LifecycleSnapshot) -
         label="control tmp",
     )
     restore_tree_retry(
+        lock_parent_dir(target),
+        snapshot.lock_parent,
+        max_bytes=METADATA_MAX_BYTES,
+        label="target lock parent",
+    )
+    restore_tree_retry(
         launch_image_dir(target),
         snapshot.launch_images,
         max_bytes=SOFTWARE_MAX_BYTES,
         label="launch images",
+    )
+    ensure_directory_entry(
+        managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
     )
 
 
@@ -3198,6 +3491,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         fail("backup slot must be between 0 and 9")
     with target_lock(target, create=False) as target:
         envelope_path = backup_envelope_path(target, slot)
+        validate_backup_slot_topology(envelope_path, "backup")
         envelope = read_json_file(
             envelope_path,
             max_bytes=METADATA_MAX_BYTES,
@@ -3602,8 +3896,13 @@ def preserve_software_files(
 
 
 def snapshot_software_state(
-    target: Path, preserve_paths: tuple[Path, ...] | list[Path] | None = None
+    target: Path,
+    preserve_paths: tuple[Path, ...] | list[Path] | None = None,
+    preserve_trees: tuple[Path, ...] | list[Path] | None = None,
 ) -> SoftwareSnapshot:
+    control_root_snapshot = snapshot_directory_entry(
+        managed_control_dir(target), "NDDev control root"
+    )
     software_root_snapshot = snapshot_tree(
         software_root(target), max_bytes=SOFTWARE_MAX_BYTES, label="software root"
     )
@@ -3615,24 +3914,42 @@ def snapshot_software_state(
     control_tmp_snapshot = snapshot_tree(
         control_tmp_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="control tmp"
     )
+    lock_parent_snapshot = snapshot_tree(
+        lock_parent_dir(target), max_bytes=METADATA_MAX_BYTES, label="target lock parent"
+    )
     preserved = preserve_software_files(
         target,
         tuple(preserve_paths or ()),
         label="software rollback",
     )
+    preserved_trees: dict[str, PreservedTree] = {}
+    for path in tuple(dict.fromkeys(preserve_trees or ())):
+        relative = software_relative_path(target, path)
+        preserved_trees[relative] = preserve_tree_for_rollback(
+            target,
+            path,
+            label=relative,
+            max_bytes=SOFTWARE_MAX_BYTES,
+        )
     return SoftwareSnapshot(
+        control_root_dir=control_root_snapshot,
         software_root=software_root_snapshot,
         software_container_dir=software_container_snapshot,
         managed_binary=managed_binary_snapshot,
         managed_bin_dir=managed_bin_dir_snapshot,
         control_tmp=control_tmp_snapshot,
+        lock_parent=lock_parent_snapshot,
         preserved_files=preserved,
+        preserved_trees=preserved_trees,
     )
 
 
 def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
     return (
-        tree_matches_snapshot(
+        directory_entry_matches(
+            managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
+        )
+        and tree_matches_snapshot(
             software_root(target),
             snapshot.software_root,
             max_bytes=SOFTWARE_MAX_BYTES,
@@ -3657,10 +3974,17 @@ def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
             max_bytes=SOFTWARE_MAX_BYTES,
             label="control tmp",
         )
+        and tree_matches_snapshot(
+            lock_parent_dir(target),
+            snapshot.lock_parent,
+            max_bytes=METADATA_MAX_BYTES,
+            label="target lock parent",
+        )
     )
 
 
 def restore_software_snapshot_once(target: Path, snapshot: SoftwareSnapshot) -> None:
+    restore_preserved_trees_retry(snapshot.preserved_trees)
     restore_preserved_files_retry(snapshot.preserved_files)
     restore_tree_retry(
         software_root(target),
@@ -3687,6 +4011,15 @@ def restore_software_snapshot_once(target: Path, snapshot: SoftwareSnapshot) -> 
         max_bytes=SOFTWARE_MAX_BYTES,
         label="control tmp",
     )
+    restore_tree_retry(
+        lock_parent_dir(target),
+        snapshot.lock_parent,
+        max_bytes=METADATA_MAX_BYTES,
+        label="target lock parent",
+    )
+    ensure_directory_entry(
+        managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
+    )
 
 
 def restore_software_snapshot_retry(target: Path, snapshot: SoftwareSnapshot) -> None:
@@ -3697,6 +4030,7 @@ def restore_software_snapshot_retry(target: Path, snapshot: SoftwareSnapshot) ->
         lambda: restore_software_snapshot_once(target, snapshot),
     )
     cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+    cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
 
 
 def software_present_paths_from_snapshot(snapshot: SoftwareSnapshot) -> list[str]:
@@ -4272,6 +4606,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 )
                 validate_intended_software_state(target, stamp_bytes, artifact["binary"])
                 cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+                cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
             except BaseException:
                 restore_software_snapshot_retry(target, snapshot)
                 raise
@@ -4325,13 +4660,35 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
                 "managed_command": str(managed_grok_path(target).resolve(strict=False)),
             }
         validate_safe_software_presence(target)
-        preserve_paths = [managed_grok_path(target)]
+        preserve_paths: list[Path] = []
+        preserve_trees: list[Path] = []
+        if managed_grok_path(target).exists() and not managed_grok_path(target).is_symlink():
+            bin_entries = (
+                sorted(managed_grok_path(target).parent.iterdir(), key=lambda item: item.name)
+                if managed_grok_path(target).parent.exists()
+                and not managed_grok_path(target).parent.is_symlink()
+                else []
+            )
+            if [entry.name for entry in bin_entries] == [GROK_COMMAND]:
+                preserve_trees.append(managed_grok_path(target).parent)
+            else:
+                preserve_paths.append(managed_grok_path(target))
         if software_root(target).exists() and not software_root(target).is_symlink():
-            for path in sorted(software_root(target).rglob("*")):
-                info = stat_existing(path, f"software removal path {path}")
-                if info is not None and stat.S_ISREG(info.st_mode):
-                    preserve_paths.append(path)
-        snapshot = snapshot_software_state(target, preserve_paths=preserve_paths)
+            container_entries = (
+                sorted(software_container(target).iterdir(), key=lambda item: item.name)
+                if software_container(target).exists()
+                and not software_container(target).is_symlink()
+                else []
+            )
+            if [entry.name for entry in container_entries] == ["grok-build"]:
+                preserve_trees.append(software_container(target))
+            else:
+                preserve_trees.append(software_root(target))
+        snapshot = snapshot_software_state(
+            target,
+            preserve_paths=preserve_paths,
+            preserve_trees=preserve_trees,
+        )
         removed = software_present_paths_from_snapshot(snapshot)
         try:
             remove_grok_software_state_once(target)
@@ -4343,6 +4700,7 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
             )
             validate_removed_software_state(target)
             cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+            cleanup_preserved_tree_stage_roots_retry(snapshot.preserved_trees)
         except BaseException:
             restore_software_snapshot_retry(target, snapshot)
             raise

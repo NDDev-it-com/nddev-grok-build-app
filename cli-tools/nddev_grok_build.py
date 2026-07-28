@@ -3216,7 +3216,24 @@ def managed_launch_mutation(child_args: list[str]) -> str | None:
     return None
 
 
-def launch(target: Path, child_args: list[str]) -> int:
+def validate_launch_workspace(raw_workspace: str | None) -> tuple[Path, str]:
+    if raw_workspace is None:
+        try:
+            workspace = Path.cwd().resolve(strict=True)
+        except OSError as exc:
+            fail(f"launch workspace cannot be captured from the caller cwd: {exc}")
+        require_real_directory(workspace, "launch workspace")
+        return workspace, "caller-cwd"
+    workspace = Path(raw_workspace)
+    if not workspace.is_absolute():
+        fail("launch workspace must be an absolute path")
+    if workspace.name in ("", ".", ".."):
+        fail("launch workspace must name a directory")
+    require_real_directory(workspace, "launch workspace")
+    return workspace.resolve(strict=True), "explicit"
+
+
+def launch(target: Path, child_args: list[str], *, workspace: str | None = None) -> int:
     require_supported_runtime_platform()
     override = child_args_use_target_scope_overrides(child_args)
     if override is not None:
@@ -3224,6 +3241,7 @@ def launch(target: Path, child_args: list[str]) -> int:
     mutation = managed_launch_mutation(child_args)
     if mutation is not None:
         fail(f"launch denied for Grok Build managed-state mutation: {mutation}")
+    launch_workspace, _workspace_source = validate_launch_workspace(workspace)
     with target_lock(target, create=False) as target:
         status = status_payload_locked(target)
         if not status["managed"]:
@@ -3284,8 +3302,9 @@ def launch(target: Path, child_args: list[str]) -> int:
         try:
             expected_image = os.fstat(descriptor)
             process = subprocess.Popen(
-                [str(launch_image), *child_args],
+                [str(launch_image), "--cwd", str(launch_workspace), *child_args],
                 env=child_env,
+                cwd=launch_workspace,
                 close_fds=True,
             )
             current_image = require_software_regular_file(
@@ -3351,6 +3370,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     restore.add_argument("--json", action="store_true")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--target", required=True)
+    launch_parser.add_argument("--workspace")
     launch_parser.add_argument("child_args", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
 
@@ -3423,7 +3443,7 @@ def dispatch(args: argparse.Namespace) -> int:
         child_args = list(args.child_args)
         if child_args[:1] == ["--"]:
             child_args = child_args[1:]
-        return launch(require_absolute_target(args.target), child_args)
+        return launch(require_absolute_target(args.target), child_args, workspace=args.workspace)
     fail(f"unknown command: {args.command}")
 
 

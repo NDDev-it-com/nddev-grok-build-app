@@ -30,7 +30,7 @@
     "software_status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-dir> [--json]",
     "software_install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-dir> [--json]",
     "software_update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-dir> [--json]",
-    "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> -- [args...]"
+    "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> [--workspace <absolute-dir>] -- [args...]"
   },
   "managed_state": {
     "environment_variable": "GROK_HOME",
@@ -119,18 +119,26 @@
     "launch_image_regular_immutable_mode": true,
     "runtime_home_tmp_xdg_stay_writable_while_locked": true,
     "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations": true,
+    "launch_workspace_explicit_or_captured_cwd": true,
+    "launch_passes_native_cwd_argument": true,
     "launch_strips_provider_credentials": true,
     "no_ambient_provider_secrets": true,
     "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation of the target or bootstrap root, especially under sandbox off, is outside the cross-user isolation boundary"
   },
   "runtime_launch": {
     "command": "grok",
-    "direct_command": "GROK_HOME=<absolute-target> <absolute-target>/bin/grok [args...]",
+    "direct_command": "GROK_HOME=<absolute-target> (cwd=<workspace>) <absolute-target>/bin/grok --cwd <workspace> [args...]",
     "environment_variable": "GROK_HOME",
-    "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> -- [args...]",
+    "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
+    "target_role": "managed configuration/runtime home",
+    "workspace_policy": "explicit --workspace absolute existing directory, otherwise captured caller cwd",
+    "workspace_argument": "--workspace <absolute-existing-dir>",
+    "native_working_directory_argument": "--cwd <workspace>",
+    "child_cwd": "<workspace>",
+    "blocks_native_workspace_overrides": true,
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112",
     "managed_command": "bin/grok",

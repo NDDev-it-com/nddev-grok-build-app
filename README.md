@@ -20,7 +20,7 @@ python3 cli-tools/nddev_grok_build.py remove --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py software-status --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/grok-home --json
 python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home -- -p "Explain this repo"
+python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home --workspace /absolute/project -- -p "Explain this repo"
 ```
 
 `install-cli` and `update-cli` install target-owned Grok Build through the
@@ -66,7 +66,9 @@ content files only, not native binaries or external runtimes.
 
 `launch` executes only the target-owned `<target>/bin/grok` with
 `GROK_HOME=<target>`, target-local child `HOME` and `TMPDIR`, auto-updates
-disabled, and provider credentials stripped from the inherited environment. It
-rejects Grok Build flags that override managed target, session, model,
-permission, sandbox, tool, plugin, cwd, or system-prompt scope and never falls
-back to `PATH`.
+disabled, and provider credentials stripped from the inherited environment. The
+managed target is not the project workspace: launch uses explicit `--workspace`
+or the caller cwd, passes it as child `cwd`, and binds Grok Build's native
+`--cwd` to the same directory. It rejects Grok Build flags that override managed
+target, session, model, permission, sandbox, tool, plugin, cwd, or system-prompt
+scope and never falls back to `PATH`.

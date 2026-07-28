@@ -370,6 +370,9 @@ def validate_manager_source() -> None:
         "def bootstrap_system_root()",
         "def acquire_bootstrap_lock(",
         "def read_lifecycle_payload(",
+        "def validate_launch_workspace(",
+        'launch_parser.add_argument("--workspace")',
+        "cwd=launch_workspace",
         "while offset < len(data)",
         "binding write made no progress",
     ):
@@ -419,6 +422,11 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
     body = (
         b"#!/bin/sh\n"
         b"set -eu\n"
+        b"if [ \"${1:-}\" != \"--cwd\" ]; then exit 73; fi\n"
+        b"if [ ! -d \"${2:-}\" ]; then exit 74; fi\n"
+        b"workspace=$(cd \"$2\" && pwd -P)\n"
+        b"current=$(pwd -P)\n"
+        b"if [ \"$workspace\" != \"$current\" ]; then exit 75; fi\n"
         b"mkdir -p \"$HOME/.config/grok-build\"\n"
         b"mkdir -p \"$XDG_CONFIG_HOME/grok-build\"\n"
         b"mkdir -p \"$XDG_CACHE_HOME/grok-build\"\n"
@@ -1025,6 +1033,9 @@ def validate_adversarial_smokes(manager: Any) -> None:
         validate_runtime_write_smoke(manager, target)
         original_digest = install_stub_software(manager, target, original)
         original_popen = manager.subprocess.Popen
+        explicit_workspace = tmp / "project-workspace"
+        explicit_workspace.mkdir(mode=0o700)
+        explicit_workspace = explicit_workspace.resolve(strict=True)
 
         class FakePopen:
             def __init__(self, command: list[str], **kwargs: Any) -> None:
@@ -1076,6 +1087,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                     "target is locked",
                 )
                 launch_image = Path(command[0])
+                if command[1:3] != ["--cwd", str(explicit_workspace)]:
+                    raise ValueError("launch did not pass native --cwd bound to the workspace")
+                if Path(kwargs.get("cwd", "")).resolve(strict=True) != explicit_workspace:
+                    raise ValueError("launch child cwd was not bound to the workspace")
                 if launch_image.parent.resolve() != manager.launch_image_dir(target).resolve():
                     raise ValueError("launch did not use a private target-internal launch image")
                 if stat.S_IMODE(launch_image.parent.lstat().st_mode) != manager.LOCK_PARENT_HELD_MODE:
@@ -1103,7 +1118,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
 
         try:
             manager.subprocess.Popen = FakePopen
-            if manager.launch(target, ["doctor"]) != 0:
+            if manager.launch(target, ["doctor"], workspace=str(explicit_workspace)) != 0:
                 raise ValueError("stubbed launch did not return success")
         finally:
             manager.subprocess.Popen = original_popen
@@ -1481,6 +1496,8 @@ def main(argv: list[str] | None = None) -> int:
         "launch_image_regular_immutable_mode",
         "runtime_home_tmp_xdg_stay_writable_while_locked",
         "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations",
+        "launch_workspace_explicit_or_captured_cwd",
+        "launch_passes_native_cwd_argument",
     ):
         if safety.get(key) is not True:
             raise ValueError(f"contract safety must set {key}=true")
@@ -1523,6 +1540,29 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("runtime launch must disable PATH fallback")
     if runtime.get("requires_current_target_owned_software") is not True:
         raise ValueError("runtime launch must require current target-owned software")
+    if runtime.get("target_role") != "managed configuration/runtime home":
+        raise ValueError("runtime launch target role mismatch")
+    if runtime.get("workspace_argument") != "--workspace <absolute-existing-dir>":
+        raise ValueError("runtime launch workspace argument mismatch")
+    if runtime.get("native_working_directory_argument") != "--cwd <workspace>":
+        raise ValueError("runtime launch native cwd argument mismatch")
+    if runtime.get("child_cwd") != "<workspace>":
+        raise ValueError("runtime launch child cwd policy mismatch")
+    if runtime.get("blocks_native_workspace_overrides") is not True:
+        raise ValueError("runtime launch must block native workspace overrides")
+    manifest_runtime = manifest.get("runtime_launch")
+    if not isinstance(manifest_runtime, dict):
+        raise ValueError("manifest runtime_launch missing")
+    for key in (
+        "target_role",
+        "workspace_policy",
+        "workspace_argument",
+        "native_working_directory_argument",
+        "child_cwd",
+        "blocks_native_workspace_overrides",
+    ):
+        if manifest_runtime.get(key) != runtime.get(key):
+            raise ValueError(f"manifest runtime_launch {key} mismatch")
     blocked_platform = "win" + "dows"
     if blocked_platform in json.dumps(runtime).lower():
         raise ValueError("runtime launch exposes an unsupported platform")

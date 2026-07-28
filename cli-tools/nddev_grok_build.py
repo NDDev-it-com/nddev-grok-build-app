@@ -331,6 +331,7 @@ class BackupCommit(NamedTuple):
 class LifecycleSnapshot(NamedTuple):
     files: dict[str, FileSnapshot]
     control_root_dir: TreeEntry
+    cleanup_root_dir: TreeEntry
     backup_pool: dict[str, TreeEntry]
     control_tmp: dict[str, TreeEntry]
     lock_parent: dict[str, TreeEntry]
@@ -340,6 +341,7 @@ class LifecycleSnapshot(NamedTuple):
 
 class SoftwareSnapshot(NamedTuple):
     control_root_dir: TreeEntry
+    cleanup_root_dir: TreeEntry
     software_root: dict[str, TreeEntry]
     software_container_dir: TreeEntry
     managed_binary: FileSnapshot
@@ -3560,9 +3562,9 @@ def write_cleanup_journal(target: Path, roots: list[Path]) -> bool:
     except FileExistsError:
         cleanup_anchor_temporary(temporary, "cleanup journal")
         fail("cleanup journal is already pending")
-    except BaseException:
+    except OSError as exc:
         cleanup_anchor_temporary(temporary, "cleanup journal")
-        raise
+        fail(f"cleanup journal publication failed: {exc}")
     parent_synced = retry_cleanup_step(
         "cleanup journal publication",
         lambda: fsync_directory(path.parent, "cleanup journal publication"),
@@ -4007,6 +4009,7 @@ def snapshot_lifecycle_state(
     control_root_snapshot = snapshot_directory_entry(
         managed_control_dir(target), "NDDev control root"
     )
+    cleanup_root_snapshot = snapshot_directory_entry(cleanup_root_dir(target), "cleanup root")
     backup_pool_snapshot = snapshot_tree(
         backup_pool(target), max_bytes=METADATA_MAX_BYTES, label="backup pool"
     )
@@ -4028,6 +4031,7 @@ def snapshot_lifecycle_state(
     return LifecycleSnapshot(
         files=files_snapshot,
         control_root_dir=control_root_snapshot,
+        cleanup_root_dir=cleanup_root_snapshot,
         backup_pool=backup_pool_snapshot,
         control_tmp=control_tmp_snapshot,
         lock_parent=lock_parent_snapshot,
@@ -4041,6 +4045,9 @@ def lifecycle_matches_snapshot(target: Path, snapshot: LifecycleSnapshot) -> boo
         managed_files_match_snapshot(target, snapshot.files)
         and directory_entry_matches(
             managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
+        )
+        and directory_entry_matches(
+            cleanup_root_dir(target), snapshot.cleanup_root_dir, "cleanup root"
         )
         and tree_matches_snapshot(
             backup_pool(target),
@@ -4072,6 +4079,7 @@ def lifecycle_matches_snapshot(target: Path, snapshot: LifecycleSnapshot) -> boo
 def restore_lifecycle_snapshot_once(target: Path, snapshot: LifecycleSnapshot) -> None:
     restore_preserved_files_retry(snapshot.preserved_files)
     restore_snapshot(target, snapshot.files)
+    ensure_directory_entry(cleanup_root_dir(target), snapshot.cleanup_root_dir, "cleanup root")
     restore_tree_retry(
         backup_pool(target), snapshot.backup_pool, max_bytes=METADATA_MAX_BYTES, label="backup pool"
     )
@@ -5168,6 +5176,7 @@ def snapshot_software_state(
     control_root_snapshot = snapshot_directory_entry(
         managed_control_dir(target), "NDDev control root"
     )
+    cleanup_root_snapshot = snapshot_directory_entry(cleanup_root_dir(target), "cleanup root")
     software_root_snapshot = snapshot_tree(
         software_root(target), max_bytes=SOFTWARE_MAX_BYTES, label="software root"
     )
@@ -5198,6 +5207,7 @@ def snapshot_software_state(
         )
     return SoftwareSnapshot(
         control_root_dir=control_root_snapshot,
+        cleanup_root_dir=cleanup_root_snapshot,
         software_root=software_root_snapshot,
         software_container_dir=software_container_snapshot,
         managed_binary=managed_binary_snapshot,
@@ -5213,6 +5223,9 @@ def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
     return (
         directory_entry_matches(
             managed_control_dir(target), snapshot.control_root_dir, "NDDev control root"
+        )
+        and directory_entry_matches(
+            cleanup_root_dir(target), snapshot.cleanup_root_dir, "cleanup root"
         )
         and tree_matches_snapshot(
             software_root(target),
@@ -5251,6 +5264,7 @@ def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
 def restore_software_snapshot_once(target: Path, snapshot: SoftwareSnapshot) -> None:
     restore_preserved_trees_retry(snapshot.preserved_trees)
     restore_preserved_files_retry(snapshot.preserved_files)
+    ensure_directory_entry(cleanup_root_dir(target), snapshot.cleanup_root_dir, "cleanup root")
     restore_tree_retry(
         software_root(target),
         snapshot.software_root,

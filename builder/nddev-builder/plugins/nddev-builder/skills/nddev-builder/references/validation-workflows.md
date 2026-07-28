@@ -1,24 +1,13 @@
 # Public Validation Workflows
 
-Run these from the public module root:
-
-```bash
-python3 -m py_compile cli-tools/nddev_grok_build.py cli-tools/validate_public_contracts.py
-python3 cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_grok_build.py list --json
-```
+Use the public module's `AGENTS.md` for contributor boundaries. The executable
+public validation contract is owned by `cli-tools/validate_public_contracts.py`;
+it checks cache-free documented commands, side-effect-free manager probes, and
+clean archive behavior.
 
 For non-live lifecycle checks, use an isolated temporary target and do not run
-`install-cli` or `update-cli` unless explicitly approved:
-
-```bash
-tmp="$(mktemp -d)"
-python3 cli-tools/nddev_grok_build.py install --target "$tmp/grok-home" --json
-python3 cli-tools/nddev_grok_build.py status --target "$tmp/grok-home" --json
-python3 cli-tools/nddev_grok_build.py switch --target "$tmp/grok-home" --profile safe --json
-python3 cli-tools/nddev_grok_build.py remove --target "$tmp/grok-home" --json
-rm -rf "$tmp"
-```
+`install-cli` or `update-cli` unless explicitly approved. Keep command details
+source-owned by the manager and its validator.
 
 Private harness gates, release evidence, root registry pins, and durable
 memories live outside this public module and are not part of this plugin.

@@ -23,9 +23,6 @@ documentation only.
 
 ## Development Checks
 
-Run from this module root:
-
-```bash
-python3 -m py_compile cli-tools/nddev_grok_build.py cli-tools/validate_public_contracts.py
-python3 cli-tools/validate_public_contracts.py
-```
+Use `cli-tools/validate_public_contracts.py` from the module root for the
+cache-free public contract, documented-command, and archive smoke validation it
+owns. Invoke direct public Python checks with bytecode disabled.

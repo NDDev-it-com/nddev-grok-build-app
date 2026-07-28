@@ -8,23 +8,13 @@ and preserves unmanaged state in the target.
 
 ## Commands
 
-```bash
-python3 cli-tools/nddev_grok_build.py list --json
-python3 cli-tools/nddev_grok_build.py status --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py plan --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py install --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py switch --target /absolute/grok-home --profile safe --json
-python3 cli-tools/nddev_grok_build.py migrate --target /absolute/grok-home --profile full-auto --json
-python3 cli-tools/nddev_grok_build.py restore --backup 0 --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py remove --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py software-status --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home -- -p "Explain this repo"
-```
+Use `cli-tools/nddev_grok_build.py --help` for the current command surface.
+Commands that mutate or inspect managed state require an explicit absolute
+target.
 
-`install-cli` and `update-cli` install target-owned Grok Build through the
-official stable-channel vendor installer with an exact version argument and
+`install-cli`, `update-cli`, and `remove-cli` manage target-owned Grok Build
+without touching setup, auth, or unrelated target state. Install and update use
+the official stable-channel vendor installer with an exact version argument and
 SHA-256 verification. The current version, npm integrity, installer URL, and
 hash are code-owned in `build/version.json`,
 `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.

@@ -70,7 +70,8 @@
       "remove",
       "software-status",
       "install-cli",
-      "update-cli"
+      "update-cli",
+      "remove-cli"
     ],
     "target_required": [
       "status",
@@ -83,6 +84,7 @@
       "software-status",
       "install-cli",
       "update-cli",
+      "remove-cli",
       "launch"
     ],
     "plan_mutates": false,
@@ -102,7 +104,69 @@
     "managed_command": "bin/grok",
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112",
-    "supported_platforms": ["macos", "linux"]
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "supported_architectures": {
+      "macos": ["arm64", "x64"],
+      "ubuntu-glibc": ["arm64", "x64"]
+    },
+    "platform_detection": {
+      "canonical_host_ids": [
+        "macos-arm64",
+        "macos-x64",
+        "ubuntu-glibc-arm64",
+        "ubuntu-glibc-x64"
+      ],
+      "macos_system": "Darwin",
+      "ubuntu_system": "Linux",
+      "ubuntu_os_release_id": "ubuntu",
+      "ubuntu_libc": "glibc",
+      "ubuntu_version_floor": null,
+      "glibc_version_floor": null,
+      "ubuntu_scope": "NDDev product scope only; upstream publishes Linux assets but no Ubuntu version or glibc floor",
+      "linux_distro_sources": ["/etc/os-release", "/usr/lib/os-release"],
+      "standard_unsupported_categories": [
+        "windows",
+        "non-ubuntu-linux",
+        "linux-musl",
+        "unsupported-architecture"
+      ],
+      "non_ubuntu_rejection": "before installer fetch, installer staging, or launch child execution"
+    },
+    "vendor_platform_observations": {
+      "official_installer_assets": {
+        "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
+        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"]
+      },
+      "installer_asset_mapping": {
+        "macos-arm64": "grok-0.2.112-macos-aarch64",
+        "macos-x64": "grok-0.2.112-macos-x86_64",
+        "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
+        "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64"
+      },
+      "npm_package": "@xai-official/grok",
+      "npm_platform_package_ids_observed_not_module_install": [
+        "@xai-official/grok-darwin-x64",
+        "@xai-official/grok-darwin-arm64",
+        "@xai-official/grok-linux-x64",
+        "@xai-official/grok-linux-arm64"
+      ],
+      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux}-{x64,arm64} package names",
+      "musl_baseline_variant": null,
+      "baseline_variant": null,
+      "upstream_ubuntu_version_floor": null,
+      "upstream_glibc_floor": null
+    }
   },
   "software_lifecycle": {
     "supported": true,
@@ -120,9 +184,11 @@
     "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-target> [--json]",
     "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-target> [--json]",
     "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-target> [--json]",
+    "remove_command": "python3 cli-tools/nddev_grok_build.py remove-cli --target <absolute-target> [--json]",
     "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-GROK-BUILD-SOFTWARE.json, .nddev-software/grok-build, .nddev-software/grok-build/versions/0.2.112, or bin/grok",
     "install_precondition": "absent target-owned software presence",
     "update_precondition": "existing safe target-owned software presence, including missing or corrupt identity stamp repair",
+    "remove_precondition": "absent, partial, or complete safe target-owned software presence",
     "target_owned": true,
     "software_root": ".nddev-software/grok-build/versions/0.2.112",
     "entrypoint": "bin/grok",
@@ -194,7 +260,10 @@
     "canonical_target_bound": true,
     "strict_envelope_validation": true,
     "base64_validate": true,
-    "restored_stamp_path_set_validated": true
+    "entry_payload_size_sha256_validated": true,
+    "restored_stamp_path_set_validated": true,
+    "transactional_slot_replacement": true,
+    "failed_mutation_removes_new_backup": true
   },
   "transaction_policy": {
     "absolute_target_required": true,
@@ -208,8 +277,13 @@
     "reject_symlink_managed_files": true,
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
+    "atomic_write_order": "temporary write, temporary mode, file fsync, replace, parent fsync",
+    "post_replace_failure_rolls_back": true,
+    "same_setup_profile_noop": true,
+    "postconditions_compare_intended_bytes": true,
+    "software_no_target_stage_or_rollback_dirs": true,
     "external_bootstrap_lock": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/<sha256(namespace+canonical-target)>",
-    "external_bootstrap_lock_system_root": "resolved /tmp; /private/tmp on macOS, /tmp on Linux",
+    "external_bootstrap_lock_system_root": "resolved /tmp; /private/tmp on macOS, /tmp on Ubuntu",
     "external_bootstrap_lock_product_root_mode": "0700",
     "external_bootstrap_lock_file_mode": "0600",
     "external_bootstrap_lock_persistent": true,

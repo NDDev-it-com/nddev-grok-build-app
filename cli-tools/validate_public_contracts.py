@@ -69,9 +69,7 @@ SETUP_ORDER = ["nddev-builder"]
 PROFILE_ORDER = ["full-auto", "safe"]
 GROK_VERSION = "0.2.112"
 NPM_PACKAGE = "@xai-official/grok"
-NPM_INTEGRITY = (
-    "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
-)
+NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
 NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
@@ -95,6 +93,8 @@ SOFTWARE_LIFECYCLE_KEYS = {
     "persisted_stage_paths",
     "presence_signal",
     "private_modes",
+    "remove_command",
+    "remove_precondition",
     "rollback_on_failure",
     "software_root",
     "stage_env",
@@ -134,10 +134,77 @@ FORBIDDEN_MANAGER_SOURCE_MARKERS = {
     "installer_source_url",
     "internal_timeout_seconds",
 }
+PUBLIC_COMMAND_DOCS = (
+    "AGENTS.md",
+    "docs/SETUP_MANAGER.md",
+    "builder/nddev-builder/plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+)
+FORBIDDEN_DOCUMENTED_CACHE_COMMANDS = ("py_compile", "compileall")
+EXPECTED_RUNTIME_PLATFORMS = [
+    "macos-arm64",
+    "macos-x64",
+    "ubuntu-glibc-arm64",
+    "ubuntu-glibc-x64",
+]
+EXPECTED_UNSUPPORTED_PLATFORMS = [
+    "windows",
+    "non-ubuntu-linux",
+    "linux-musl",
+    "unsupported-architecture",
+]
+EXPECTED_PLATFORM_ARCHITECTURES = {
+    "macos": ["arm64", "x64"],
+    "ubuntu-glibc": ["arm64", "x64"],
+}
+MACHINE_ARCH_BY_HOST_ARCH = {"arm64": "aarch64", "x64": "x86_64"}
+EXPECTED_PLATFORM_DETECTION = {
+    "canonical_host_ids": EXPECTED_RUNTIME_PLATFORMS,
+    "macos_system": "Darwin",
+    "ubuntu_system": "Linux",
+    "ubuntu_os_release_id": "ubuntu",
+    "ubuntu_libc": "glibc",
+    "ubuntu_version_floor": None,
+    "glibc_version_floor": None,
+    "ubuntu_scope": (
+        "NDDev product scope only; upstream publishes Linux assets but no Ubuntu version "
+        "or glibc floor"
+    ),
+    "linux_distro_sources": ["/etc/os-release", "/usr/lib/os-release"],
+    "standard_unsupported_categories": EXPECTED_UNSUPPORTED_PLATFORMS,
+    "non_ubuntu_rejection": "before installer fetch, installer staging, or launch child execution",
+}
+EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
+    "official_installer_assets": {
+        "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
+        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],
+    },
+    "installer_asset_mapping": {
+        "macos-arm64": "grok-0.2.112-macos-aarch64",
+        "macos-x64": "grok-0.2.112-macos-x86_64",
+        "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
+        "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64",
+    },
+    "npm_package": "@xai-official/grok",
+    "npm_platform_package_ids_observed_not_module_install": [
+        "@xai-official/grok-darwin-x64",
+        "@xai-official/grok-darwin-arm64",
+        "@xai-official/grok-linux-x64",
+        "@xai-official/grok-linux-arm64",
+    ],
+    "npm_package_distinction": (
+        "Installer asset names are not derived from npm "
+        "@xai-official/grok-{darwin,linux}-{x64,arm64} package names"
+    ),
+    "musl_baseline_variant": None,
+    "baseline_variant": None,
+    "upstream_ubuntu_version_floor": None,
+    "upstream_glibc_floor": None,
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--skip-archive-smoke", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -364,9 +431,128 @@ def validate_manager_source() -> None:
         "def acquire_bootstrap_lock(",
         "while offset < len(data)",
         "bootstrap lock binding write made no progress",
+        '"remove-cli"',
+        "def remove_grok_software(",
+        "def restore_lifecycle_snapshot_retry(",
+        "def restore_software_snapshot_retry(",
+        "ROLLBACK_MAX_ATTEMPTS",
     ):
         if marker not in source:
             raise ValueError(f"manager source is missing lock invariant marker: {marker}")
+
+
+def validate_public_documented_commands() -> None:
+    for relative in PUBLIC_COMMAND_DOCS:
+        path = ROOT / relative
+        text = path.read_text(encoding="utf-8")
+        for marker in FORBIDDEN_DOCUMENTED_CACHE_COMMANDS:
+            if marker in text:
+                raise ValueError(f"{relative}: published validation command uses {marker}")
+        for number, line in enumerate(text.splitlines(), start=1):
+            if "python3 " not in line:
+                continue
+            if "python3 -B " not in line:
+                raise ValueError(f"{relative}:{number}: python3 command must use -B")
+            if "PYTHONDONTWRITEBYTECODE=1" not in line:
+                raise ValueError(
+                    f"{relative}:{number}: python3 command must set PYTHONDONTWRITEBYTECODE=1"
+                )
+
+
+def validate_no_python_caches(root: Path) -> None:
+    for path in root.rglob("*"):
+        if ".git" in path.parts:
+            continue
+        if path.name in {"__pycache__", ".pytest_cache", ".ruff_cache"}:
+            raise ValueError(f"cache directory was created: {path.relative_to(root)}")
+        if path.suffix in {".pyc", ".pyo"}:
+            raise ValueError(f"bytecode cache was created: {path.relative_to(root)}")
+
+
+def run_archive_command(archive: Path, command: list[str], env: dict[str, str]) -> None:
+    completed = subprocess.run(
+        command,
+        cwd=archive,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            f"archive command failed ({' '.join(command)}): {completed.stdout}{completed.stderr}"
+        )
+
+
+def cleanup_bootstrap_lock_for_target(manager: Any, target: Path) -> None:
+    parent = target.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    identity = manager.bootstrap_target_identity(target)
+    system_root = Path("/tmp").resolve(strict=True)
+    product_root = manager.bootstrap_product_root_path(system_root)
+    lock_path = product_root / manager.bootstrap_lock_digest(identity)
+    with contextlib.suppress(FileNotFoundError):
+        lock_path.unlink()
+    with contextlib.suppress(OSError):
+        product_root.rmdir()
+
+
+def validate_clean_archive_cache_smoke() -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-grok-build-archive-smoke-") as raw:
+        scratch = Path(raw)
+        archive = scratch / "archive"
+        shutil.copytree(
+            ROOT,
+            archive,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", ".ruff_cache"),
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+            "HOME": str(scratch / "home"),
+            "GROK_HOME": str(scratch / "grok-home-trap"),
+            "TMPDIR": str(scratch / "tmp"),
+        }
+        for directory in ("home", "grok-home-trap", "tmp", "targets"):
+            (scratch / directory).mkdir(mode=0o700)
+        manager = load_manager_module()
+        status_target = scratch / "targets" / "grok-home"
+        commands = [
+            [
+                sys.executable,
+                "-B",
+                "cli-tools/validate_public_contracts.py",
+                "--skip-archive-smoke",
+            ],
+            [sys.executable, "-B", "cli-tools/nddev_grok_build.py", "--help"],
+            [sys.executable, "-B", "cli-tools/nddev_grok_build.py", "list", "--json"],
+            [
+                sys.executable,
+                "-B",
+                "cli-tools/nddev_grok_build.py",
+                "status",
+                "--target",
+                str(status_target),
+                "--json",
+            ],
+            [
+                sys.executable,
+                "-B",
+                "cli-tools/nddev_grok_build.py",
+                "remove-cli",
+                "--target",
+                str(status_target),
+                "--json",
+            ],
+        ]
+        try:
+            for command in commands:
+                run_archive_command(archive, command, env)
+                validate_no_python_caches(archive)
+        finally:
+            cleanup_bootstrap_lock_for_target(manager, status_target)
 
 
 def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:
@@ -411,24 +597,24 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
     body = (
         b"#!/bin/sh\n"
         b"set -eu\n"
-        b"mkdir -p \"$HOME/.config/grok-build\"\n"
-        b"mkdir -p \"$XDG_CONFIG_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_CACHE_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_DATA_HOME/grok-build\"\n"
-        b"mkdir -p \"$XDG_STATE_HOME/grok-build\"\n"
-        b"mkdir -p \"$TMPDIR/grok-build\"\n"
-        b"mkdir -p \"$GROK_HOME/runtime-state\"\n"
-        b"printf home > \"$HOME/.config/grok-build/home.txt\"\n"
-        b"printf config > \"$XDG_CONFIG_HOME/grok-build/config.txt\"\n"
-        b"printf cache > \"$XDG_CACHE_HOME/grok-build/cache.txt\"\n"
-        b"printf data > \"$XDG_DATA_HOME/grok-build/data.txt\"\n"
-        b"printf state > \"$XDG_STATE_HOME/grok-build/session.txt\"\n"
-        b"printf tmp > \"$TMPDIR/grok-build/tmp.txt\"\n"
-        b"printf target > \"$GROK_HOME/runtime-state/target.txt\"\n"
-        b"if rm \"$GROK_HOME/.nddev-grok-build/locks/target.lock\" 2>/dev/null; then exit 70; fi\n"
-        b"if rmdir \"$GROK_HOME/.nddev-grok-build/locks\" 2>/dev/null; then exit 71; fi\n"
-        b"if (printf bad > \"$0\") 2>/dev/null; then exit 72; fi\n"
-        b"printf ok > \"$GROK_HOME/runtime-state/result.txt\"\n"
+        b'mkdir -p "$HOME/.config/grok-build"\n'
+        b'mkdir -p "$XDG_CONFIG_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_CACHE_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_DATA_HOME/grok-build"\n'
+        b'mkdir -p "$XDG_STATE_HOME/grok-build"\n'
+        b'mkdir -p "$TMPDIR/grok-build"\n'
+        b'mkdir -p "$GROK_HOME/runtime-state"\n'
+        b'printf home > "$HOME/.config/grok-build/home.txt"\n'
+        b'printf config > "$XDG_CONFIG_HOME/grok-build/config.txt"\n'
+        b'printf cache > "$XDG_CACHE_HOME/grok-build/cache.txt"\n'
+        b'printf data > "$XDG_DATA_HOME/grok-build/data.txt"\n'
+        b'printf state > "$XDG_STATE_HOME/grok-build/session.txt"\n'
+        b'printf tmp > "$TMPDIR/grok-build/tmp.txt"\n'
+        b'printf target > "$GROK_HOME/runtime-state/target.txt"\n'
+        b'if rm "$GROK_HOME/.nddev-grok-build/locks/target.lock" 2>/dev/null; then exit 70; fi\n'
+        b'if rmdir "$GROK_HOME/.nddev-grok-build/locks" 2>/dev/null; then exit 71; fi\n'
+        b'if (printf bad > "$0") 2>/dev/null; then exit 72; fi\n'
+        b'printf ok > "$GROK_HOME/runtime-state/result.txt"\n'
     )
     install_stub_software(manager, target, body)
     rc = manager.launch(target, ["runtime-write"])
@@ -448,9 +634,15 @@ def validate_runtime_write_smoke(manager: Any, target: Path) -> None:
     for path, content in expected.items():
         if path.read_bytes() != content:
             raise ValueError(f"runtime write smoke did not write expected state: {path}")
-    if stat.S_IMODE(manager.managed_control_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+    if (
+        stat.S_IMODE(manager.managed_control_dir(target).lstat().st_mode)
+        != manager.OWNER_DIRECTORY_MODE
+    ):
         raise ValueError("control root must stay writable after launch")
-    if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+    if (
+        stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
+        != manager.OWNER_DIRECTORY_MODE
+    ):
         raise ValueError("lock parent was not restored after launch")
     if manager.launch_image_dir(target).exists():
         raise ValueError("launch image directory was not pruned after launch")
@@ -483,10 +675,22 @@ def write_backup_envelope(manager: Any, envelope_path: Path, envelope: dict[str,
     envelope_path.chmod(manager.OWNER_FILE_MODE)
 
 
-def encoded_json(value: dict[str, Any]) -> str:
-    return base64.b64encode(
-        (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    ).decode("ascii")
+def backup_entry(data: bytes) -> dict[str, Any]:
+    return {
+        "payload": base64.b64encode(data).decode("ascii"),
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def backup_entry_payload(envelope: dict[str, Any], relative: str) -> bytes:
+    entry = envelope["files"][relative]
+    if not isinstance(entry, dict):
+        raise ValueError(f"backup entry is not an object: {relative}")
+    payload = entry["payload"]
+    if not isinstance(payload, str):
+        raise ValueError(f"backup entry payload is not a string: {relative}")
+    return base64.b64decode(payload.encode("ascii"), validate=True)
 
 
 def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, Any]) -> None:
@@ -509,38 +713,33 @@ def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, 
         envelope_path.chmod(manager.OWNER_FILE_MODE)
 
     def corrupt_base64(envelope: dict[str, Any]) -> None:
-        envelope["files"]["config.toml"] = "!!!!"
+        envelope["files"]["config.toml"]["payload"] = "!!!!"
 
     def corrupt_digest(envelope: dict[str, Any]) -> None:
-        payload = base64.b64decode(
-            envelope["files"]["config.toml"].encode("ascii"), validate=True
-        )
+        payload = backup_entry_payload(envelope, "config.toml")
         marker = manager.MANAGED_BEGIN.encode("utf-8")
         if marker not in payload:
             raise ValueError("config.toml backup is missing the managed marker")
-        envelope["files"]["config.toml"] = base64.b64encode(
+        envelope["files"]["config.toml"] = backup_entry(
             payload.replace(marker, marker + b"\n# corrupt", 1)
-        ).decode("ascii")
+        )
 
     def missing_path(envelope: dict[str, Any]) -> None:
         del envelope["files"]["config.toml"]
 
     def extra_path(envelope: dict[str, Any]) -> None:
-        envelope["files"]["unmanaged.txt"] = base64.b64encode(b"extra").decode("ascii")
+        envelope["files"]["unmanaged.txt"] = backup_entry(b"extra")
 
     def wrong_scalar(envelope: dict[str, Any]) -> None:
         envelope["slot"] = str(slot)
 
     def extra_stamp_path(envelope: dict[str, Any]) -> None:
-        stamp = json.loads(
-            base64.b64decode(
-                envelope["files"][manager.STAMP_NAME].encode("ascii"), validate=True
-            ).decode("utf-8")
-        )
+        stamp = json.loads(backup_entry_payload(envelope, manager.STAMP_NAME).decode("utf-8"))
         payload = b"managed by forged stamp\n"
         stamp["managed_files"]["unmanaged.txt"] = hashlib.sha256(payload).hexdigest()
-        envelope["files"][manager.STAMP_NAME] = encoded_json(stamp)
-        envelope["files"]["unmanaged.txt"] = base64.b64encode(payload).decode("ascii")
+        stamp_payload = (json.dumps(stamp, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        envelope["files"][manager.STAMP_NAME] = backup_entry(stamp_payload)
+        envelope["files"]["unmanaged.txt"] = backup_entry(payload)
 
     variant(corrupt_base64, "valid base64")
     variant(corrupt_digest, "digest mismatch")
@@ -554,6 +753,63 @@ def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, 
         raise ValueError("valid restore did not restore the backed-up profile")
     if manager.status_payload(target)["drift"]:
         raise ValueError("valid restore left managed drift")
+
+
+def validate_remove_cli_smokes(
+    manager: Any, tmp: Path, setup: dict[str, Any], profile: dict[str, Any]
+) -> None:
+    target = tmp / "remove-cli-home"
+    target.mkdir(mode=0o700)
+    auth = target / "auth.json"
+    auth.write_text('{"preserve":true}\n', encoding="utf-8")
+    bin_other = target / "bin" / "keep"
+    bin_other.parent.mkdir(mode=0o700)
+    bin_other.write_text("keep\n", encoding="utf-8")
+    other_software = target / ".nddev-software" / "other-tool" / "state.txt"
+    other_software.parent.mkdir(mode=0o700, parents=True)
+    other_software.write_text("keep\n", encoding="utf-8")
+    manager.write_setup(target, setup, profile)
+    before_setup = target_managed_bytes(manager, target)
+    install_stub_software(manager, target, b"#!/bin/sh\nexit 0\n")
+
+    removed = manager.remove_grok_software(target)
+    if removed["operation"] != "remove":
+        raise ValueError("remove-cli did not report remove for present software")
+    if removed["removed"] != removed["changed"]:
+        raise ValueError("remove-cli changed/removed path sets diverged")
+    for required in (
+        "bin/grok",
+        manager.SOFTWARE_VERSION_BINARY_RELATIVE,
+        manager.SOFTWARE_STAMP_RELATIVE,
+    ):
+        if required not in removed["removed"]:
+            raise ValueError(f"remove-cli missing removed path: {required}")
+    if manager.software_status(target)["present"]:
+        raise ValueError("remove-cli left target-owned software presence")
+    if target_managed_bytes(manager, target) != before_setup:
+        raise ValueError("remove-cli changed setup-managed files")
+    if auth.read_text(encoding="utf-8") != '{"preserve":true}\n':
+        raise ValueError("remove-cli changed auth state")
+    if bin_other.read_text(encoding="utf-8") != "keep\n":
+        raise ValueError("remove-cli changed unrelated bin state")
+    if other_software.read_text(encoding="utf-8") != "keep\n":
+        raise ValueError("remove-cli changed unrelated software state")
+
+    absent = manager.remove_grok_software(target)
+    if absent["operation"] != "absent" or absent["changed"] or absent["removed"]:
+        raise ValueError("remove-cli absent state is not deterministic")
+
+    partial = tmp / "remove-cli-partial"
+    partial.mkdir(mode=0o700)
+    partial_grok = partial / "bin" / "grok"
+    partial_grok.parent.mkdir(mode=0o700)
+    partial_grok.write_bytes(b"partial\n")
+    partial_grok.chmod(manager.OWNER_EXEC_MODE)
+    partial_removed = manager.remove_grok_software(partial)
+    if partial_removed["removed"] != ["bin/grok"]:
+        raise ValueError("remove-cli partial state removed path set mismatch")
+    if partial_grok.exists():
+        raise ValueError("remove-cli partial state left bin/grok")
 
 
 def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> None:
@@ -619,7 +875,9 @@ def fork_expect_manager_error(manager: Any, callback: Any, expected: str) -> Non
             except BaseException as exc:
                 send_child_result(write_fd, {"ok": False, "error": repr(exc)})
             else:
-                send_child_result(write_fd, {"ok": False, "error": "operation unexpectedly succeeded"})
+                send_child_result(
+                    write_fd, {"ok": False, "error": "operation unexpectedly succeeded"}
+                )
         finally:
             os._exit(0)
     os.close(write_fd)
@@ -927,6 +1185,216 @@ def validate_fetch_error_smokes(manager: Any) -> None:
         manager.urllib.request.urlopen = original_urlopen
 
 
+def validate_platform_scope(
+    manager: Any,
+    manifest: dict[str, Any],
+    contract: dict[str, Any],
+    baseline: dict[str, Any],
+) -> None:
+    manifest_runtime = manifest.get("runtime_launch")
+    contract_runtime = contract.get("runtime_launch")
+    if not isinstance(manifest_runtime, dict) or not isinstance(contract_runtime, dict):
+        raise ValueError("runtime_launch metadata missing")
+    for label, runtime in (("manifest", manifest_runtime), ("contract", contract_runtime)):
+        if runtime.get("supported_platforms") != EXPECTED_RUNTIME_PLATFORMS:
+            raise ValueError(f"{label} runtime_launch supported_platforms host IDs mismatch")
+        if runtime.get("unsupported_platforms") != EXPECTED_UNSUPPORTED_PLATFORMS:
+            raise ValueError(f"{label} runtime_launch unsupported_platforms mismatch")
+        if runtime.get("supported_architectures") != EXPECTED_PLATFORM_ARCHITECTURES:
+            raise ValueError(f"{label} runtime_launch supported_architectures mismatch")
+        if runtime.get("platform_detection") != EXPECTED_PLATFORM_DETECTION:
+            raise ValueError(f"{label} runtime_launch platform_detection mismatch")
+        if runtime.get("vendor_platform_observations") != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS:
+            raise ValueError(f"{label} runtime_launch vendor_platform_observations mismatch")
+
+    support = baseline.get("platform_support")
+    if not isinstance(support, dict):
+        raise ValueError("baseline platform_support missing")
+    supported = support.get("nddev_supported_hosts")
+    if not isinstance(supported, list) or len(supported) != len(EXPECTED_RUNTIME_PLATFORMS):
+        raise ValueError("baseline supported host list mismatch")
+    by_host = {item.get("host_id"): item for item in supported if isinstance(item, dict)}
+    if set(by_host) != set(EXPECTED_RUNTIME_PLATFORMS):
+        raise ValueError("baseline supported hosts must use canonical NDDev host IDs")
+    for host_id, expected_asset in EXPECTED_VENDOR_PLATFORM_OBSERVATIONS[
+        "installer_asset_mapping"
+    ].items():
+        host = by_host[host_id]
+        if host.get("vendor_installer_asset") != expected_asset:
+            raise ValueError(f"baseline host vendor asset mismatch: {host_id}")
+        if host_id.startswith("ubuntu-glibc-"):
+            if host.get("os_release_id") != "ubuntu" or host.get("libc") != "glibc":
+                raise ValueError("baseline Ubuntu hosts must bind ID=ubuntu and glibc")
+            if host.get("variants") != ["desktop", "server"]:
+                raise ValueError("baseline Ubuntu hosts must cover desktop and server")
+        elif host.get("variants") != ["desktop"]:
+            raise ValueError("baseline macOS hosts must be desktop-scoped")
+    if support.get("standard_unsupported_categories") != EXPECTED_UNSUPPORTED_PLATFORMS:
+        raise ValueError("baseline unsupported categories mismatch")
+    if "no Ubuntu version or glibc floor" not in str(support.get("ubuntu_scope", "")):
+        raise ValueError("baseline must label Ubuntu as NDDev product scope only")
+    if support.get("ubuntu_os_release_id") != "ubuntu" or support.get("ubuntu_libc") != "glibc":
+        raise ValueError("baseline Ubuntu host check mismatch")
+    if support.get("upstream_ubuntu_version_floor") is not None:
+        raise ValueError("baseline must not invent an Ubuntu version floor")
+    if support.get("upstream_glibc_floor") is not None:
+        raise ValueError("baseline must not invent a glibc floor")
+    if (
+        support.get("official_installer_assets")
+        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS["official_installer_assets"]
+    ):
+        raise ValueError("baseline official installer asset names mismatch")
+    if (
+        support.get("installer_asset_mapping")
+        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS["installer_asset_mapping"]
+    ):
+        raise ValueError("baseline installer asset mapping mismatch")
+    if (
+        support.get("npm_platform_package_ids_observed_not_module_install")
+        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS[
+            "npm_platform_package_ids_observed_not_module_install"
+        ]
+    ):
+        raise ValueError("baseline npm platform package observation mismatch")
+    if "@xai-official/grok-{darwin,linux}-{x64,arm64}" not in str(
+        support.get("npm_package_distinction", "")
+    ):
+        raise ValueError("baseline must distinguish installer assets from npm platform packages")
+    if support.get("musl_baseline_variant") is not None:
+        raise ValueError("baseline must not invent a musl variant")
+    if support.get("baseline_variant") is not None:
+        raise ValueError("baseline must not invent a baseline variant")
+    upstream = support.get("upstream_linux_install_metadata_preserved")
+    if not isinstance(upstream, dict):
+        raise ValueError("baseline upstream Linux install metadata missing")
+    release = baseline["release"]
+    for key, release_key in (
+        ("official_installer", "official_installer"),
+        ("official_installer_sha256", "official_installer_sha256"),
+        ("npm_package", "npm_package"),
+        ("npm_tarball", "npm_tarball"),
+        ("npm_integrity", "npm_integrity"),
+        ("npm_shasum", "npm_shasum"),
+    ):
+        if upstream.get(key) != release.get(release_key):
+            raise ValueError(f"baseline upstream Linux metadata mismatch: {key}")
+
+    for platform_id, system, os_release, libc_info, prefix in (
+        ("macos", "Darwin", {}, None, "macos"),
+        ("ubuntu", "Linux", {"ID": "ubuntu", "ID_LIKE": "debian"}, ("glibc", ""), "ubuntu-glibc"),
+    ):
+        for host_architecture in EXPECTED_PLATFORM_ARCHITECTURES[prefix]:
+            architecture = MACHINE_ARCH_BY_HOST_ARCH[host_architecture]
+            info = manager.runtime_platform_info(
+                system_name=system,
+                machine_name=architecture,
+                os_release=os_release,
+                libc_info=libc_info,
+            )
+            if not info.supported or info.platform_id != platform_id:
+                raise ValueError(f"{platform_id}/{architecture} platform model was rejected")
+            if info.host_id != f"{prefix}-{host_architecture}":
+                raise ValueError(f"{platform_id}/{architecture} host ID mismatch: {info.host_id}")
+            if (
+                info.vendor_installer_asset
+                != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS["installer_asset_mapping"][info.host_id]
+            ):
+                raise ValueError(f"{info.host_id} vendor installer asset mismatch")
+            if manager.require_supported_runtime_platform(info) != info:
+                raise ValueError("runtime platform preflight did not return the checked model")
+
+    for os_release in ({"ID": "debian", "ID_LIKE": "ubuntu"}, {"ID": "fedora"}, {}):
+        info = manager.runtime_platform_info(
+            system_name="Linux",
+            machine_name="x86_64",
+            os_release=os_release,
+            libc_info=("glibc", ""),
+        )
+        if info.supported or info.platform_id != "non-ubuntu-linux":
+            raise ValueError("non-Ubuntu Linux platform model was accepted")
+        expect_manager_error(
+            manager,
+            lambda checked=info: manager.require_supported_runtime_platform(checked),
+            "Ubuntu is required",
+        )
+    musl_info = manager.runtime_platform_info(
+        system_name="Linux",
+        machine_name="x86_64",
+        os_release={"ID": "ubuntu"},
+        libc_info=("musl", "1.2.5"),
+    )
+    if musl_info.supported or musl_info.platform_id != "linux-musl":
+        raise ValueError("Linux musl platform model was accepted")
+    expect_manager_error(
+        manager,
+        lambda checked=musl_info: manager.require_supported_runtime_platform(checked),
+        "Ubuntu glibc is required",
+    )
+    arch_info = manager.runtime_platform_info(
+        system_name="Darwin",
+        machine_name="ppc64",
+    )
+    if arch_info.supported or arch_info.platform_id != "unsupported-architecture":
+        raise ValueError("unsupported architecture platform model was accepted")
+    windows_info = manager.runtime_platform_info(system_name="Windows", machine_name="x86_64")
+    if windows_info.supported or windows_info.platform_id != "windows":
+        raise ValueError("Windows platform model was accepted")
+
+    original_info = manager.runtime_platform_info
+    original_read = manager.read_pinned_installer
+    original_stage = manager.run_vendor_installer
+    original_popen = manager.subprocess.Popen
+    touched = {"fetch": False, "stage": False, "launch": False}
+
+    def non_ubuntu_info() -> Any:
+        return original_info(
+            system_name="Linux",
+            machine_name="x86_64",
+            os_release={"ID": "debian", "ID_LIKE": "ubuntu"},
+            libc_info=("glibc", ""),
+        )
+
+    def fail_fetch() -> Any:
+        touched["fetch"] = True
+        raise ValueError("network fetch should not be reached")
+
+    def fail_stage(*_args: Any, **_kwargs: Any) -> Any:
+        touched["stage"] = True
+        raise ValueError("installer staging should not be reached")
+
+    class FailLaunch:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            touched["launch"] = True
+            raise ValueError("launch child should not be reached")
+
+    try:
+        manager.runtime_platform_info = non_ubuntu_info
+        manager.read_pinned_installer = fail_fetch
+        manager.run_vendor_installer = fail_stage
+        manager.subprocess.Popen = FailLaunch
+        with tempfile.TemporaryDirectory(prefix="nddev-grok-build-platform-") as raw:
+            target = Path(raw) / "target"
+            expect_manager_error(
+                manager,
+                lambda: manager.install_grok_software(target, "install-cli"),
+                "Ubuntu is required",
+            )
+            if target.exists():
+                raise ValueError("non-Ubuntu install preflight created target state")
+            expect_manager_error(
+                manager,
+                lambda: manager.launch(target, []),
+                "Ubuntu is required",
+            )
+        if any(touched.values()):
+            raise ValueError(f"non-Ubuntu preflight reached runtime side effects: {touched}")
+    finally:
+        manager.runtime_platform_info = original_info
+        manager.read_pinned_installer = original_read
+        manager.run_vendor_installer = original_stage
+        manager.subprocess.Popen = original_popen
+
+
 def validate_adversarial_smokes(manager: Any) -> None:
     setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
     profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
@@ -961,6 +1429,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
         validate_bootstrap_handover_smoke(manager, target)
         validate_bootstrap_binding_smokes(manager, target)
         validate_restore_backup_smokes(manager, target, setup)
+        validate_remove_cli_smokes(manager, tmp, setup, profile)
 
         denied = (
             ["update"],
@@ -977,14 +1446,8 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 "managed-state mutation",
             )
 
-        original = (
-            b"#!/bin/sh\n"
-            b"printf 'original\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
-        )
-        replacement = (
-            b"#!/bin/sh\n"
-            b"printf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
-        )
+        original = b"#!/bin/sh\nprintf 'original\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
+        replacement = b"#!/bin/sh\nprintf 'replacement\\n' > \"$GROK_HOME/stable-fd-result.txt\"\n"
         validate_runtime_write_smoke(manager, target)
         original_digest = install_stub_software(manager, target, original)
         original_popen = manager.subprocess.Popen
@@ -1028,9 +1491,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 safe_profile = manager.load_profile("safe")
                 fork_expect_manager_error(
                     manager,
-                    lambda: manager.write_setup(
-                        target, setup, safe_profile, require_existing=True
-                    ),
+                    lambda: manager.write_setup(target, setup, safe_profile, require_existing=True),
                     "target is locked",
                 )
                 fork_expect_manager_error(
@@ -1041,7 +1502,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 launch_image = Path(command[0])
                 if launch_image.parent.resolve() != manager.launch_image_dir(target).resolve():
                     raise ValueError("launch did not use a private target-internal launch image")
-                if stat.S_IMODE(launch_image.parent.lstat().st_mode) != manager.LOCK_PARENT_HELD_MODE:
+                if (
+                    stat.S_IMODE(launch_image.parent.lstat().st_mode)
+                    != manager.LOCK_PARENT_HELD_MODE
+                ):
                     raise ValueError("launch image directory must be non-writable during launch")
                 if stat.S_IMODE(launch_image.lstat().st_mode) != manager.IMMUTABLE_EXEC_MODE:
                     raise ValueError("launch image must use immutable executable mode")
@@ -1070,7 +1534,10 @@ def validate_adversarial_smokes(manager: Any) -> None:
                 raise ValueError("stubbed launch did not return success")
         finally:
             manager.subprocess.Popen = original_popen
-        if stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode) != manager.OWNER_DIRECTORY_MODE:
+        if (
+            stat.S_IMODE(manager.lock_parent_dir(target).lstat().st_mode)
+            != manager.OWNER_DIRECTORY_MODE
+        ):
             raise ValueError("launch lock parent was not restored")
         if manager.launch_image_dir(target).exists():
             raise ValueError("launch image directory was not removed")
@@ -1152,9 +1619,13 @@ def validate_builder_toolkit(build_version: str) -> None:
         if not stat.S_ISREG(info.st_mode):
             raise ValueError(f"builder payload is not a regular file: {path.relative_to(ROOT)}")
         if stat.S_IMODE(info.st_mode) & 0o111:
-            raise ValueError(f"builder payload must not ship executable files: {path.relative_to(ROOT)}")
+            raise ValueError(
+                f"builder payload must not ship executable files: {path.relative_to(ROOT)}"
+            )
         if path.suffix.lower() in {".bin", ".exe", ".dmg", ".pkg", ".deb", ".rpm", ".zip", ".tgz"}:
-            raise ValueError(f"builder payload must not ship binary/runtime archives: {path.relative_to(ROOT)}")
+            raise ValueError(
+                f"builder payload must not ship binary/runtime archives: {path.relative_to(ROOT)}"
+            )
 
     for skill in BUILDER_SKILLS:
         skill_path = plugin_root / "skills" / skill / "SKILL.md"
@@ -1233,7 +1704,9 @@ def validate_release_workflow(manifest: dict[str, Any], contract: dict[str, Any]
     required_runtime = contract_runtime_required_paths(manifest, contract)
     missing_runtime = required_runtime - runtime_paths
     if missing_runtime:
-        raise ValueError(f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}")
+        raise ValueError(
+            f"release runtime_paths missing runtime closure: {sorted(missing_runtime)}"
+        )
     validate_claude_bridge(archive_paths, runtime_paths)
 
 
@@ -1242,10 +1715,7 @@ def validate_skill_local_references(plugin_root: Path, skill_path: Path, text: s
     for reference in re.findall(r"`([^`]+)`", text):
         if not reference.endswith(".md"):
             continue
-        if not (
-            reference.startswith("../")
-            or reference.startswith("references/")
-        ):
+        if not (reference.startswith("../") or reference.startswith("references/")):
             continue
         candidate = (skill_path.parent / reference).resolve()
         if candidate != plugin_real and plugin_real not in candidate.parents:
@@ -1259,7 +1729,7 @@ def validate_skill_local_references(plugin_root: Path, skill_path: Path, text: s
 
 
 def main(argv: list[str] | None = None) -> int:
-    parse_args(argv)
+    args = parse_args(argv)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = load_json(ROOT / "build" / "version.json")
     manifest = load_json(ROOT / "build" / "manifest.json")
@@ -1282,9 +1752,15 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("contract must not expose skeleton status")
     if manifest.get("setup_ids") != ids or contract["setup_system"]["setup_ids"] != ids:
         raise ValueError("setup ids are not synchronized")
-    if manifest.get("profile_ids") != profiles or contract["setup_system"]["profile_ids"] != profiles:
+    if (
+        manifest.get("profile_ids") != profiles
+        or contract["setup_system"]["profile_ids"] != profiles
+    ):
         raise ValueError("profile ids are not synchronized")
-    if manifest.get("default_setup") != "nddev-builder" or manifest.get("default_profile") != "full-auto":
+    if (
+        manifest.get("default_setup") != "nddev-builder"
+        or manifest.get("default_profile") != "full-auto"
+    ):
         raise ValueError("manifest default setup/profile mismatch")
     backup_policy = manifest.get("backup_policy")
     if not isinstance(backup_policy, dict):
@@ -1294,7 +1770,10 @@ def main(argv: list[str] | None = None) -> int:
     for key in (
         "strict_envelope_validation",
         "base64_validate",
+        "entry_payload_size_sha256_validated",
         "restored_stamp_path_set_validated",
+        "transactional_slot_replacement",
+        "failed_mutation_removes_new_backup",
     ):
         if backup_policy.get(key) is not True:
             raise ValueError(f"manifest backup_policy must set {key}=true")
@@ -1356,7 +1835,15 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest lock ordering mismatch")
     if transaction.get("launch_requires_current_software") is not True:
         raise ValueError("manifest must require current software for launch")
+    if transaction.get("atomic_write_order") != (
+        "temporary write, temporary mode, file fsync, replace, parent fsync"
+    ):
+        raise ValueError("manifest atomic write order mismatch")
     for key in (
+        "post_replace_failure_rolls_back",
+        "same_setup_profile_noop",
+        "postconditions_compare_intended_bytes",
+        "software_no_target_stage_or_rollback_dirs",
         "restore_prevalidates_backup_before_mutation",
         "restore_post_validates_clean_state",
         "restore_rollback_byte_identical_on_failure",
@@ -1371,9 +1858,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest launch image file mode mismatch")
     if transaction.get("runtime_home_tmp_xdg_writable_while_locked") is not True:
         raise ValueError("manifest must keep runtime HOME/TMP/XDG writable")
-    if "same user" not in str(
-        transaction.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if "same user" not in str(transaction.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("manifest must document the same-user mutation boundary")
     if "sandbox off" not in str(
         transaction.get("same_uid_malicious_mutation_boundary", "")
@@ -1408,8 +1895,15 @@ def main(argv: list[str] | None = None) -> int:
         "legacy_sibling_backups_read_only_when_strictly_validated",
         "restore_validates_backup_envelope_before_mutation",
         "restore_validates_stamp_path_set_and_digests",
+        "backup_entry_payload_size_sha256_validated",
+        "backup_slot_replacement_transactional",
+        "failed_mutation_removes_new_backup",
         "restore_post_validates_clean_state",
         "restore_rollback_byte_identical_on_failure",
+        "same_setup_profile_noop",
+        "postconditions_compare_intended_bytes",
+        "post_replace_failure_rolls_back",
+        "software_no_target_stage_or_rollback_dirs",
         "installer_fetch_errors_are_domain_errors",
         "launch_requires_current_target_owned_software",
         "launch_uses_verified_private_image",
@@ -1419,13 +1913,17 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if safety.get(key) is not True:
             raise ValueError(f"contract safety must set {key}=true")
-    if "same user" not in str(
-        safety.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if safety.get("atomic_write_order") != (
+        "temporary write, temporary mode, file fsync, replace, parent fsync"
+    ):
+        raise ValueError("contract atomic write order mismatch")
+    if "same user" not in str(safety.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("contract must document the same-user mutation boundary")
-    if "sandbox off" not in str(
-        safety.get("same_uid_malicious_mutation_boundary", "")
-    ).replace("-", " "):
+    if "sandbox off" not in str(safety.get("same_uid_malicious_mutation_boundary", "")).replace(
+        "-", " "
+    ):
         raise ValueError("contract must document the sandbox-off same-user boundary")
     if build.get("grok_build_tested") != baseline["release"]["npm_version"]:
         raise ValueError("tested Grok Build version differs from baseline release")
@@ -1459,7 +1957,7 @@ def main(argv: list[str] | None = None) -> int:
     if runtime.get("requires_current_target_owned_software") is not True:
         raise ValueError("runtime launch must require current target-owned software")
     blocked_platform = "win" + "dows"
-    if blocked_platform in json.dumps(runtime).lower():
+    if blocked_platform in json.dumps(runtime.get("supported_platforms", [])).lower():
         raise ValueError("runtime launch exposes an unsupported platform")
     lifecycle = contract.get("software_lifecycle")
     if not isinstance(lifecycle, dict) or set(lifecycle) != SOFTWARE_LIFECYCLE_KEYS:
@@ -1484,6 +1982,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("software-status must not execute the target binary")
     if lifecycle.get("fetch_errors_are_domain_errors") is not True:
         raise ValueError("software_lifecycle must normalize fetch errors")
+    if "remove-cli" not in str(lifecycle.get("remove_command", "")):
+        raise ValueError("software_lifecycle remove_command must expose remove-cli")
+    if "unrelated" not in str(lifecycle.get("remove_precondition", "")):
+        raise ValueError("software_lifecycle remove_precondition must preserve unrelated state")
     if "present=true" not in str(lifecycle.get("presence_signal", "")):
         raise ValueError("software_lifecycle must document present=true")
     stage_env = lifecycle.get("stage_env")
@@ -1498,8 +2000,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest installer SHA-256 mismatch")
     if manifest_lifecycle.get("version") != GROK_VERSION:
         raise ValueError("manifest software version mismatch")
+    if "remove-cli" not in str(manifest_lifecycle.get("remove_command", "")):
+        raise ValueError("manifest software lifecycle must expose remove-cli")
     validate_manager_source()
+    validate_public_documented_commands()
     manager = load_manager_module()
+    validate_platform_scope(manager, manifest, contract, baseline)
     expected_managed = sorted([*manager.content_managed_paths(), manager.STAMP_NAME])
     if sorted(manifest.get("managed_files", [])) != expected_managed:
         raise ValueError("manifest managed_files do not match manager projection")
@@ -1520,6 +2026,8 @@ def main(argv: list[str] | None = None) -> int:
         validate_fetch_error_smokes(manager)
     validate_workflows()
     validate_release_workflow(manifest, contract)
+    if not args.skip_archive_smoke:
+        validate_clean_archive_cache_smoke()
     print("validate_public_contracts.py: PASS")
     return 0
 

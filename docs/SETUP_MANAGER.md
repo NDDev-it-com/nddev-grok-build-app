@@ -53,10 +53,19 @@ memory, subagents, LSP, write, web fetch, or tool search.
 
 ## Target-Owned Software
 
-`software-status`, `install-cli`, and `update-cli` manage the Grok Build runtime
-separately from setup/profile switching. Production installs use only the
-official installer and pin metadata recorded in `cli-tools/nddev_grok_build.py`,
-`build/version.json`, and `references/grok-build-baseline.json`.
+`software-status`, `install-cli`, `update-cli`, and `remove-cli` manage the Grok
+Build runtime separately from setup/profile switching. Production installs use
+only the official installer and pin metadata recorded in
+`cli-tools/nddev_grok_build.py`, `build/version.json`, and
+`references/grok-build-baseline.json`. Removal is limited to manager-owned
+runtime state and preserves setup content, auth, and unrelated target files.
+NDDev runtime management is product-scoped to macOS and Ubuntu desktop/server.
+The Ubuntu gate is an NDDev product boundary over the vendor Linux artifact:
+upstream has not published an Ubuntu version or glibc floor. Canonical product
+host ids, unsupported host categories, and vendor artifact/package observations
+are source-owned by `config/nddev-contract.json`,
+`build/manifest.json`, `references/grok-build-baseline.json`, and the manager's
+platform detection functions.
 
 The vendor installer runs in an isolated staging area. The manager validates the
 staged runtime, then persists only target-owned software state defined by the
@@ -85,13 +94,7 @@ requires an explicit `--profile` during migration.
 
 ## Validation
 
-Run public, non-live checks from the module root:
-
-```bash
-python3 -m py_compile cli-tools/nddev_grok_build.py cli-tools/validate_public_contracts.py
-python3 cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_grok_build.py list --json
-```
-
-Use isolated temporary targets for lifecycle checks. Do not run `install-cli` or
-`update-cli` against live user state.
+Public validation is owned by `cli-tools/validate_public_contracts.py`, which
+also checks the cache-free documented command surface. Use isolated temporary
+targets for lifecycle checks. Do not run software lifecycle commands against
+live user state.

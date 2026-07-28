@@ -103,6 +103,85 @@
     "mcp": ["[mcp_servers.<name>]", "plugin .mcp.json"],
     "instructions": ["AGENTS.md", "Agents.md", "AGENT.md"]
   },
+  "platform_support": {
+    "nddev_supported_hosts": [
+      {
+        "host_id": "macos-arm64",
+        "product_platform": "macos",
+        "system": "Darwin",
+        "host_architecture": "arm64",
+        "vendor_installer_asset": "grok-0.2.112-macos-aarch64",
+        "variants": ["desktop"]
+      },
+      {
+        "host_id": "macos-x64",
+        "product_platform": "macos",
+        "system": "Darwin",
+        "host_architecture": "x64",
+        "vendor_installer_asset": "grok-0.2.112-macos-x86_64",
+        "variants": ["desktop"]
+      },
+      {
+        "host_id": "ubuntu-glibc-arm64",
+        "product_platform": "ubuntu",
+        "system": "Linux",
+        "os_release_id": "ubuntu",
+        "libc": "glibc",
+        "host_architecture": "arm64",
+        "vendor_installer_asset": "grok-0.2.112-linux-aarch64",
+        "variants": ["desktop", "server"]
+      },
+      {
+        "host_id": "ubuntu-glibc-x64",
+        "product_platform": "ubuntu",
+        "system": "Linux",
+        "os_release_id": "ubuntu",
+        "libc": "glibc",
+        "host_architecture": "x64",
+        "vendor_installer_asset": "grok-0.2.112-linux-x86_64",
+        "variants": ["desktop", "server"]
+      }
+    ],
+    "standard_unsupported_categories": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "ubuntu_scope": "NDDev product scope only; upstream publishes Linux assets but no Ubuntu version or glibc floor.",
+    "ubuntu_os_release_id": "ubuntu",
+    "ubuntu_libc": "glibc",
+    "upstream_ubuntu_version_floor": null,
+    "upstream_glibc_floor": null,
+    "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before installer fetch, installer staging, or launch child execution.",
+    "official_installer_assets": {
+      "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
+      "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"]
+    },
+    "installer_asset_mapping": {
+      "macos-arm64": "grok-0.2.112-macos-aarch64",
+      "macos-x64": "grok-0.2.112-macos-x86_64",
+      "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
+      "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64"
+    },
+    "npm_platform_package_ids_observed_not_module_install": [
+      "@xai-official/grok-darwin-x64",
+      "@xai-official/grok-darwin-arm64",
+      "@xai-official/grok-linux-x64",
+      "@xai-official/grok-linux-arm64"
+    ],
+    "npm_package_distinction": "The npm package pin is @xai-official/grok; exact installer assets are grok-0.2.112-{macos,linux}-{x86_64,aarch64} and are not npm @xai-official/grok-{darwin,linux}-{x64,arm64} package names.",
+    "musl_baseline_variant": null,
+    "baseline_variant": null,
+    "upstream_linux_install_metadata_preserved": {
+      "official_installer": "https://x.ai/cli/install.sh",
+      "official_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
+      "npm_package": "@xai-official/grok",
+      "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
+      "npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
+      "npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
+    }
+  },
   "official_sources": [
     {
       "fact": "product-and-install",

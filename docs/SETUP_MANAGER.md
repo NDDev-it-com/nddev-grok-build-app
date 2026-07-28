@@ -25,6 +25,9 @@ while setup mutation, software mutation, restore, remove, migrate, status-read
 requiring owned state, or managed launch is in progress. The exact bootstrap and
 target-local lock mechanics are intentionally not copied here; use the manager
 source and the public contract fields as the executable reference.
+The setup `update` command refreshes the installed setup/profile identity from
+module-owned sources; it is distinct from `update-cli`, which only manages the
+target-owned Grok Build runtime.
 
 ## Content Setup
 
@@ -66,6 +69,8 @@ host ids, unsupported host categories, and vendor artifact/package observations
 are source-owned by `config/nddev-contract.json`,
 `build/manifest.json`, `references/grok-build-baseline.json`, and the manager's
 platform detection functions.
+Unsupported hosts are rejected before target resolution, target inspection,
+target creation, locks, installer network/stage work, or launch child execution.
 
 The vendor installer runs in an isolated staging area. The manager validates the
 staged runtime, then persists only target-owned software state defined by the

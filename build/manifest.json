@@ -65,6 +65,7 @@
       "plan",
       "install",
       "switch",
+      "update",
       "migrate",
       "restore",
       "remove",
@@ -78,6 +79,7 @@
       "plan",
       "install",
       "switch",
+      "update",
       "migrate",
       "restore",
       "remove",
@@ -141,12 +143,13 @@
         "linux-musl",
         "unsupported-architecture"
       ],
-      "non_ubuntu_rejection": "before installer fetch, installer staging, or launch child execution"
+      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, bootstrap lock, target lock, installer fetch, installer staging, or launch child execution"
     },
     "vendor_platform_observations": {
       "official_installer_assets": {
         "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
-        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"]
+        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],
+        "windows": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"]
       },
       "installer_asset_mapping": {
         "macos-arm64": "grok-0.2.112-macos-aarch64",
@@ -159,9 +162,18 @@
         "@xai-official/grok-darwin-x64",
         "@xai-official/grok-darwin-arm64",
         "@xai-official/grok-linux-x64",
-        "@xai-official/grok-linux-arm64"
+        "@xai-official/grok-linux-arm64",
+        "@xai-official/grok-win32-x64",
+        "@xai-official/grok-win32-arm64"
       ],
-      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux}-{x64,arm64} package names",
+      "product_unsupported_vendor_observations": {
+        "windows": {
+          "product_supported": false,
+          "official_installer_assets": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"],
+          "npm_optional_packages": ["@xai-official/grok-win32-x64", "@xai-official/grok-win32-arm64"]
+        }
+      },
+      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names",
       "musl_baseline_variant": null,
       "baseline_variant": null,
       "upstream_ubuntu_version_floor": null,
@@ -277,11 +289,13 @@
     "reject_symlink_managed_files": true,
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
+    "object_preserving_rollback": true,
     "atomic_write_order": "temporary write, temporary mode, file fsync, replace, parent fsync",
     "post_replace_failure_rolls_back": true,
     "same_setup_profile_noop": true,
     "postconditions_compare_intended_bytes": true,
     "software_no_target_stage_or_rollback_dirs": true,
+    "supported_host_preflight_before_target_resolution": true,
     "external_bootstrap_lock": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/<sha256(namespace+canonical-target)>",
     "external_bootstrap_lock_system_root": "resolved /tmp; /private/tmp on macOS, /tmp on Ubuntu",
     "external_bootstrap_lock_product_root_mode": "0700",

@@ -24,6 +24,7 @@
     "plan_command": "python3 cli-tools/nddev_grok_build.py plan --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
     "install_command": "python3 cli-tools/nddev_grok_build.py install --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
     "switch_command": "python3 cli-tools/nddev_grok_build.py switch --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
+    "update_command": "python3 cli-tools/nddev_grok_build.py update --target <absolute-dir> [--json]",
     "migrate_command": "python3 cli-tools/nddev_grok_build.py migrate --target <absolute-dir> [--profile <id>] [--json]",
     "restore_command": "python3 cli-tools/nddev_grok_build.py restore --backup <0..9> --target <absolute-dir> [--json]",
     "remove_command": "python3 cli-tools/nddev_grok_build.py remove --target <absolute-dir> [--json]",
@@ -112,10 +113,13 @@
     "restore_post_validates_clean_state": true,
     "restore_rollback_byte_identical_on_failure": true,
     "same_setup_profile_noop": true,
+    "setup_update_uses_installed_identity": true,
     "postconditions_compare_intended_bytes": true,
     "atomic_write_order": "temporary write, temporary mode, file fsync, replace, parent fsync",
     "post_replace_failure_rolls_back": true,
+    "object_preserving_rollback": true,
     "software_no_target_stage_or_rollback_dirs": true,
+    "supported_host_preflight_before_target_resolution": true,
     "installer_fetch_errors_are_domain_errors": true,
     "launch_requires_clean_managed_target": true,
     "launch_requires_current_target_owned_software": true,
@@ -178,12 +182,13 @@
         "linux-musl",
         "unsupported-architecture"
       ],
-      "non_ubuntu_rejection": "before installer fetch, installer staging, or launch child execution"
+      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, bootstrap lock, target lock, installer fetch, installer staging, or launch child execution"
     },
     "vendor_platform_observations": {
       "official_installer_assets": {
         "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
-        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"]
+        "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],
+        "windows": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"]
       },
       "installer_asset_mapping": {
         "macos-arm64": "grok-0.2.112-macos-aarch64",
@@ -196,9 +201,18 @@
         "@xai-official/grok-darwin-x64",
         "@xai-official/grok-darwin-arm64",
         "@xai-official/grok-linux-x64",
-        "@xai-official/grok-linux-arm64"
+        "@xai-official/grok-linux-arm64",
+        "@xai-official/grok-win32-x64",
+        "@xai-official/grok-win32-arm64"
       ],
-      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux}-{x64,arm64} package names",
+      "product_unsupported_vendor_observations": {
+        "windows": {
+          "product_supported": false,
+          "official_installer_assets": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"],
+          "npm_optional_packages": ["@xai-official/grok-win32-x64", "@xai-official/grok-win32-arm64"]
+        }
+      },
+      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names",
       "musl_baseline_variant": null,
       "baseline_variant": null,
       "upstream_ubuntu_version_floor": null,
@@ -274,7 +288,7 @@
     "baseline_ref": "references/grok-build-baseline.json",
     "version_ref": "build/version.json",
     "official_docs": {
-      "overview": "https://docs.x.ai/build/getting-started",
+      "overview": "https://docs.x.ai/build/overview",
       "cli": "https://docs.x.ai/build/cli/reference",
       "settings": "https://docs.x.ai/build/settings",
       "settings_reference": "https://docs.x.ai/build/settings/reference",

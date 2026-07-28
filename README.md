@@ -10,7 +10,8 @@ and preserves unmanaged state in the target.
 
 Use `cli-tools/nddev_grok_build.py --help` for the current command surface.
 Commands that mutate or inspect managed state require an explicit absolute
-target.
+target. `update` refreshes the currently installed setup/profile identity from
+the module sources; `update-cli` refreshes target-owned Grok Build software.
 
 `install-cli`, `update-cli`, and `remove-cli` manage target-owned Grok Build
 without touching setup, auth, or unrelated target state. Install and update use
@@ -18,6 +19,9 @@ the official stable-channel vendor installer with an exact version argument and
 SHA-256 verification. The current version, npm integrity, installer URL, and
 hash are code-owned in `build/version.json`,
 `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.
+All target-bound setup, software, status, plan, restore, remove, and launch
+commands reject unsupported hosts before target resolution or runtime side
+effects. Product runtime management is scoped to macOS and Ubuntu hosts.
 
 ## Setup And Profiles
 

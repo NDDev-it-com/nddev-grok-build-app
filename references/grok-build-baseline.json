@@ -6,7 +6,7 @@
     "vendor": "xAI",
     "status": "stable-channel-available-ga-unclaimed",
     "official_product_url": "https://x.ai/cli",
-    "official_docs_url": "https://docs.x.ai/build/getting-started"
+    "official_docs_url": "https://docs.x.ai/build/overview"
   },
   "runtime": {
     "command": "grok",
@@ -153,10 +153,11 @@
     "ubuntu_libc": "glibc",
     "upstream_ubuntu_version_floor": null,
     "upstream_glibc_floor": null,
-    "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before installer fetch, installer staging, or launch child execution.",
+    "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before target resolution, target inspection, target creation, bootstrap lock, target lock, installer fetch, installer staging, or launch child execution.",
     "official_installer_assets": {
       "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
-      "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"]
+      "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],
+      "windows": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"]
     },
     "installer_asset_mapping": {
       "macos-arm64": "grok-0.2.112-macos-aarch64",
@@ -168,9 +169,18 @@
       "@xai-official/grok-darwin-x64",
       "@xai-official/grok-darwin-arm64",
       "@xai-official/grok-linux-x64",
-      "@xai-official/grok-linux-arm64"
+      "@xai-official/grok-linux-arm64",
+      "@xai-official/grok-win32-x64",
+      "@xai-official/grok-win32-arm64"
     ],
-    "npm_package_distinction": "The npm package pin is @xai-official/grok; exact installer assets are grok-0.2.112-{macos,linux}-{x86_64,aarch64} and are not npm @xai-official/grok-{darwin,linux}-{x64,arm64} package names.",
+    "product_unsupported_vendor_observations": {
+      "windows": {
+        "product_supported": false,
+        "official_installer_assets": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"],
+        "npm_optional_packages": ["@xai-official/grok-win32-x64", "@xai-official/grok-win32-arm64"]
+      }
+    },
+    "npm_package_distinction": "The npm package pin is @xai-official/grok; exact installer assets are grok-0.2.112-{macos,linux}-{x86_64,aarch64} plus product-unsupported grok-0.2.112-windows-{x86_64,aarch64}.exe observations, and these are not npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names.",
     "musl_baseline_variant": null,
     "baseline_variant": null,
     "upstream_linux_install_metadata_preserved": {
@@ -188,8 +198,8 @@
       "url": "https://x.ai/cli"
     },
     {
-      "fact": "getting-started-auth",
-      "url": "https://docs.x.ai/build/getting-started"
+      "fact": "build-overview",
+      "url": "https://docs.x.ai/build/overview"
     },
     {
       "fact": "cli-command-flags",

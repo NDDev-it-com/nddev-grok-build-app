@@ -17,6 +17,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -171,12 +173,16 @@ EXPECTED_PLATFORM_DETECTION = {
     ),
     "linux_distro_sources": ["/etc/os-release", "/usr/lib/os-release"],
     "standard_unsupported_categories": EXPECTED_UNSUPPORTED_PLATFORMS,
-    "non_ubuntu_rejection": "before installer fetch, installer staging, or launch child execution",
+    "non_ubuntu_rejection": (
+        "before target resolution, target inspection, target creation, bootstrap lock, "
+        "target lock, installer fetch, installer staging, or launch child execution"
+    ),
 }
 EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
     "official_installer_assets": {
         "macos": ["grok-0.2.112-macos-x86_64", "grok-0.2.112-macos-aarch64"],
         "linux": ["grok-0.2.112-linux-x86_64", "grok-0.2.112-linux-aarch64"],
+        "windows": ["grok-0.2.112-windows-x86_64.exe", "grok-0.2.112-windows-aarch64.exe"],
     },
     "installer_asset_mapping": {
         "macos-arm64": "grok-0.2.112-macos-aarch64",
@@ -190,10 +196,25 @@ EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
         "@xai-official/grok-darwin-arm64",
         "@xai-official/grok-linux-x64",
         "@xai-official/grok-linux-arm64",
+        "@xai-official/grok-win32-x64",
+        "@xai-official/grok-win32-arm64",
     ],
+    "product_unsupported_vendor_observations": {
+        "windows": {
+            "product_supported": False,
+            "official_installer_assets": [
+                "grok-0.2.112-windows-x86_64.exe",
+                "grok-0.2.112-windows-aarch64.exe",
+            ],
+            "npm_optional_packages": [
+                "@xai-official/grok-win32-x64",
+                "@xai-official/grok-win32-arm64",
+            ],
+        }
+    },
     "npm_package_distinction": (
         "Installer asset names are not derived from npm "
-        "@xai-official/grok-{darwin,linux}-{x64,arm64} package names"
+        "@xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names"
     ),
     "musl_baseline_variant": None,
     "baseline_variant": None,
@@ -205,6 +226,11 @@ EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-archive-smoke", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--network-observation",
+        action="store_true",
+        help="verify explicit official source metadata over HTTPS",
+    )
     return parser.parse_args(argv)
 
 
@@ -432,9 +458,13 @@ def validate_manager_source() -> None:
         "while offset < len(data)",
         "bootstrap lock binding write made no progress",
         '"remove-cli"',
+        '"update"',
+        "def update_setup(",
+        "def require_command_supported_host(",
         "def remove_grok_software(",
         "def restore_lifecycle_snapshot_retry(",
         "def restore_software_snapshot_retry(",
+        "preserve_file_for_rollback(",
         "ROLLBACK_MAX_ATTEMPTS",
     ):
         if marker not in source:
@@ -467,6 +497,53 @@ def validate_no_python_caches(root: Path) -> None:
             raise ValueError(f"cache directory was created: {path.relative_to(root)}")
         if path.suffix in {".pyc", ".pyo"}:
             raise ValueError(f"bytecode cache was created: {path.relative_to(root)}")
+
+
+def fetch_official_source_text(url: str) -> str:
+    if not url.startswith(("https://x.ai/", "https://docs.x.ai/")):
+        raise ValueError(f"network observation URL is not an official xAI source: {url}")
+    request = urllib.request.Request(url, headers={"User-Agent": "nddev-grok-build-validator"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            status = getattr(response, "status", 200)
+            if status < 200 or status >= 300:
+                raise ValueError(f"official source returned HTTP {status}: {url}")
+            content_type = response.headers.get("Content-Type", "")
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                raise ValueError(
+                    f"official source has unexpected content type {content_type}: {url}"
+                )
+            data = response.read(1024 * 1024 + 1)
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise ValueError(f"official source fetch failed: {url}: {exc}") from exc
+    if len(data) > 1024 * 1024:
+        raise ValueError(f"official source response is too large: {url}")
+    return data.decode("utf-8", errors="replace")
+
+
+def validate_network_observations(contract: dict[str, Any], baseline: dict[str, Any]) -> None:
+    docs_url = baseline.get("product", {}).get("official_docs_url")
+    if docs_url != "https://docs.x.ai/build/overview":
+        raise ValueError("baseline official_docs_url must use the live Grok Build overview")
+    contract_docs = contract.get("runtime_compatibility", {}).get("official_docs", {})
+    if contract_docs.get("overview") != docs_url:
+        raise ValueError("contract official docs overview does not match baseline")
+    source_urls = {
+        item.get("url") for item in baseline.get("official_sources", []) if isinstance(item, dict)
+    }
+    if "https://docs.x.ai/build/getting-started" in source_urls:
+        raise ValueError("baseline still references dead Grok Build getting-started docs")
+    required_sources = {
+        "https://x.ai/cli": ("Grok Build", "install.sh"),
+        "https://docs.x.ai/build/overview": ("Grok Build", "coding agent"),
+    }
+    for url, markers in required_sources.items():
+        if url not in source_urls and url != "https://x.ai/cli":
+            raise ValueError(f"baseline official_sources missing {url}")
+        text = fetch_official_source_text(url)
+        for marker in markers:
+            if marker not in text:
+                raise ValueError(f"official source is stale or unexpected: {url}: {marker}")
 
 
 def run_archive_command(archive: Path, command: list[str], env: dict[str, str]) -> None:
@@ -821,6 +898,29 @@ def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> N
     payload = json.loads(output.getvalue())
     if expected not in str(payload.get("error", "")):
         raise ValueError(f"unexpected manager JSON error: {payload}")
+
+
+def validate_json_argparse_errors(manager: Any) -> None:
+    cases = (
+        (["not-a-command", "--json"], "invalid choice"),
+        (["status", "--json"], "required: --target"),
+        (["restore", "--backup", "not-int", "--target", "/tmp/grok", "--json"], "invalid int"),
+    )
+    for argv, expected in cases:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = manager.main(list(argv))
+        if rc != 2:
+            raise ValueError(f"argparse JSON boundary returned {rc}: {argv}")
+        if stderr.getvalue():
+            raise ValueError(f"argparse JSON boundary wrote stderr: {argv}: {stderr.getvalue()}")
+        lines = stdout.getvalue().splitlines()
+        if len(lines) != 1:
+            raise ValueError(f"argparse JSON boundary must emit one line: {argv}: {lines}")
+        payload = json.loads(lines[0])
+        if set(payload) != {"error"} or expected not in str(payload["error"]):
+            raise ValueError(f"argparse JSON boundary emitted unexpected payload: {payload}")
 
 
 def close_fds_except(keep: set[int]) -> None:
@@ -1256,7 +1356,13 @@ def validate_platform_scope(
         ]
     ):
         raise ValueError("baseline npm platform package observation mismatch")
-    if "@xai-official/grok-{darwin,linux}-{x64,arm64}" not in str(
+    unsupported_vendor = support.get("product_unsupported_vendor_observations")
+    if (
+        unsupported_vendor
+        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS["product_unsupported_vendor_observations"]
+    ):
+        raise ValueError("baseline product-unsupported vendor observations mismatch")
+    if "@xai-official/grok-{darwin,linux,win32}-{x64,arm64}" not in str(
         support.get("npm_package_distinction", "")
     ):
         raise ValueError("baseline must distinguish installer assets from npm platform packages")
@@ -1339,12 +1445,27 @@ def validate_platform_scope(
     windows_info = manager.runtime_platform_info(system_name="Windows", machine_name="x86_64")
     if windows_info.supported or windows_info.platform_id != "windows":
         raise ValueError("Windows platform model was accepted")
+    if windows_info.vendor_installer_asset != "grok-0.2.112-windows-x86_64.exe":
+        raise ValueError("Windows x64 vendor observation mismatch")
+    windows_arm = manager.runtime_platform_info(system_name="Windows", machine_name="aarch64")
+    if windows_arm.supported or windows_arm.platform_id != "windows":
+        raise ValueError("Windows arm64 platform model was accepted")
+    if windows_arm.vendor_installer_asset != "grok-0.2.112-windows-aarch64.exe":
+        raise ValueError("Windows arm64 vendor observation mismatch")
 
     original_info = manager.runtime_platform_info
     original_read = manager.read_pinned_installer
     original_stage = manager.run_vendor_installer
     original_popen = manager.subprocess.Popen
-    touched = {"fetch": False, "stage": False, "launch": False}
+    original_bootstrap = manager.acquire_bootstrap_lock
+    original_validate_target = manager.validate_target
+    touched = {
+        "target": False,
+        "bootstrap": False,
+        "fetch": False,
+        "stage": False,
+        "launch": False,
+    }
 
     def non_ubuntu_info() -> Any:
         return original_info(
@@ -1367,25 +1488,44 @@ def validate_platform_scope(
             touched["launch"] = True
             raise ValueError("launch child should not be reached")
 
+    def fail_bootstrap(*_args: Any, **_kwargs: Any) -> Any:
+        touched["bootstrap"] = True
+        raise ValueError("bootstrap lock should not be reached")
+
+    def fail_target(*_args: Any, **_kwargs: Any) -> Any:
+        touched["target"] = True
+        raise ValueError("target resolution should not be reached")
+
     try:
         manager.runtime_platform_info = non_ubuntu_info
         manager.read_pinned_installer = fail_fetch
         manager.run_vendor_installer = fail_stage
         manager.subprocess.Popen = FailLaunch
+        manager.acquire_bootstrap_lock = fail_bootstrap
+        manager.validate_target = fail_target
         with tempfile.TemporaryDirectory(prefix="nddev-grok-build-platform-") as raw:
             target = Path(raw) / "target"
-            expect_manager_error(
-                manager,
+            setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
+            profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
+            operations = (
+                lambda: manager.status_payload(target),
+                lambda: manager.software_status(target),
+                lambda: manager.plan_payload(target, setup, profile),
+                lambda: manager.write_setup(target, setup, profile),
+                lambda: manager.update_setup(target),
+                lambda: manager.write_setup(target, setup, profile, require_existing=True),
+                lambda: manager.migrate_setup(target, setup, None),
+                lambda: manager.restore_backup(target, 0),
+                lambda: manager.remove_setup(target),
                 lambda: manager.install_grok_software(target, "install-cli"),
-                "Ubuntu is required",
-            )
-            if target.exists():
-                raise ValueError("non-Ubuntu install preflight created target state")
-            expect_manager_error(
-                manager,
+                lambda: manager.install_grok_software(target, "update-cli"),
+                lambda: manager.remove_grok_software(target),
                 lambda: manager.launch(target, []),
-                "Ubuntu is required",
             )
+            for operation in operations:
+                expect_manager_error(manager, operation, "Ubuntu is required")
+                if target.exists():
+                    raise ValueError("unsupported host preflight created target state")
         if any(touched.values()):
             raise ValueError(f"non-Ubuntu preflight reached runtime side effects: {touched}")
     finally:
@@ -1393,6 +1533,8 @@ def validate_platform_scope(
         manager.read_pinned_installer = original_read
         manager.run_vendor_installer = original_stage
         manager.subprocess.Popen = original_popen
+        manager.acquire_bootstrap_lock = original_bootstrap
+        manager.validate_target = original_validate_target
 
 
 def validate_adversarial_smokes(manager: Any) -> None:
@@ -1420,6 +1562,9 @@ def validate_adversarial_smokes(manager: Any) -> None:
         sibling_backups.mkdir(mode=0o700)
         (sibling_backups / "marker").write_text("must not be read\n", encoding="utf-8")
         manager.write_setup(target, setup, profile)
+        setup_update = manager.update_setup(target)
+        if setup_update["operation"] != "current" or setup_update["changed"]:
+            raise ValueError("setup update must be a warm no-op when installed content is current")
         if not sibling_lock.is_dir() or not sibling_backups.is_dir():
             raise ValueError("manager touched precreated sibling lock/backup state")
         status = manager.status_payload(target)
@@ -1762,6 +1907,20 @@ def main(argv: list[str] | None = None) -> int:
         or manifest.get("default_profile") != "full-auto"
     ):
         raise ValueError("manifest default setup/profile mismatch")
+    command_policy = manifest.get("command_policy")
+    if not isinstance(command_policy, dict):
+        raise ValueError("manifest command_policy missing")
+    for key in ("json_supported", "target_required"):
+        values = command_policy.get(key)
+        if not isinstance(values, list) or "update" not in values:
+            raise ValueError(f"manifest command_policy.{key} must include setup update")
+    setup_system = contract.get("setup_system")
+    if not isinstance(setup_system, dict):
+        raise ValueError("contract setup_system missing")
+    if " update " not in f" {setup_system.get('update_command', '')} ":
+        raise ValueError("contract setup_system must expose setup update_command")
+    if "update-cli" in str(setup_system.get("update_command", "")):
+        raise ValueError("setup update_command must be distinct from update-cli")
     backup_policy = manifest.get("backup_policy")
     if not isinstance(backup_policy, dict):
         raise ValueError("manifest backup_policy missing")
@@ -1841,9 +2000,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest atomic write order mismatch")
     for key in (
         "post_replace_failure_rolls_back",
+        "object_preserving_rollback",
         "same_setup_profile_noop",
         "postconditions_compare_intended_bytes",
         "software_no_target_stage_or_rollback_dirs",
+        "supported_host_preflight_before_target_resolution",
         "restore_prevalidates_backup_before_mutation",
         "restore_post_validates_clean_state",
         "restore_rollback_byte_identical_on_failure",
@@ -1901,9 +2062,12 @@ def main(argv: list[str] | None = None) -> int:
         "restore_post_validates_clean_state",
         "restore_rollback_byte_identical_on_failure",
         "same_setup_profile_noop",
+        "setup_update_uses_installed_identity",
         "postconditions_compare_intended_bytes",
         "post_replace_failure_rolls_back",
+        "object_preserving_rollback",
         "software_no_target_stage_or_rollback_dirs",
+        "supported_host_preflight_before_target_resolution",
         "installer_fetch_errors_are_domain_errors",
         "launch_requires_current_target_owned_software",
         "launch_uses_verified_private_image",
@@ -1937,6 +2101,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("npm shasum mismatch")
     if baseline["runtime"]["command"] != "grok":
         raise ValueError("baseline command must be grok")
+    if baseline.get("product", {}).get("official_docs_url") != "https://docs.x.ai/build/overview":
+        raise ValueError("baseline official docs URL must use the live build overview")
+    if "getting-started" in json.dumps(baseline.get("official_sources", [])):
+        raise ValueError("baseline official sources must not reference dead getting-started docs")
     if baseline["release"].get("stable_channel_version") != GROK_VERSION:
         raise ValueError("baseline stable channel version mismatch")
     if baseline["release"].get("official_installer") != INSTALLER_URL:
@@ -2004,7 +2172,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest software lifecycle must expose remove-cli")
     validate_manager_source()
     validate_public_documented_commands()
+    if args.network_observation:
+        validate_network_observations(contract, baseline)
     manager = load_manager_module()
+    validate_json_argparse_errors(manager)
     validate_platform_scope(manager, manifest, contract, baseline)
     expected_managed = sorted([*manager.content_managed_paths(), manager.STAMP_NAME])
     if sorted(manifest.get("managed_files", [])) != expected_managed:

@@ -17,6 +17,7 @@ import platform
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -174,6 +175,21 @@ UNSUPPORTED_HOST_CATEGORIES = (
     "linux-musl",
     "unsupported-architecture",
 )
+HOST_PREFLIGHT_COMMANDS = {
+    "status",
+    "software-status",
+    "plan",
+    "install",
+    "update",
+    "switch",
+    "migrate",
+    "restore",
+    "remove",
+    "install-cli",
+    "update-cli",
+    "remove-cli",
+    "launch",
+}
 SUPPORTED_MACHINE_ARCHITECTURES = ("aarch64", "x86_64")
 HOST_ARCH_BY_MACHINE_ARCH = {
     "aarch64": "arm64",
@@ -184,6 +200,10 @@ VENDOR_INSTALLER_ASSET_BY_HOST_ID = {
     "macos-x64": "grok-0.2.112-macos-x86_64",
     "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
     "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64",
+}
+VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH = {
+    "aarch64": "grok-0.2.112-windows-aarch64.exe",
+    "x86_64": "grok-0.2.112-windows-x86_64.exe",
 }
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 STAMP_KEYS_V1 = {
@@ -237,6 +257,20 @@ class RuntimePlatformInfo(NamedTuple):
 class FileSnapshot(NamedTuple):
     data: bytes | None
     mode: int | None
+    mtime_ns: int | None = None
+    dev: int | None = None
+    ino: int | None = None
+
+
+class PreservedFile(NamedTuple):
+    target: Path
+    path: Path
+    label: str
+    max_bytes: int
+    snapshot: FileSnapshot
+    stage_root: Path
+    parent_mtime_ns: int | None
+    backup_path: Path | None
 
 
 class TreeEntry(NamedTuple):
@@ -256,6 +290,7 @@ class LifecycleSnapshot(NamedTuple):
     backup_pool: dict[str, TreeEntry]
     control_tmp: dict[str, TreeEntry]
     launch_images: dict[str, TreeEntry]
+    preserved_files: dict[str, PreservedFile]
 
 
 class SoftwareSnapshot(NamedTuple):
@@ -264,6 +299,16 @@ class SoftwareSnapshot(NamedTuple):
     managed_binary: FileSnapshot
     managed_bin_dir: TreeEntry
     control_tmp: dict[str, TreeEntry]
+    preserved_files: dict[str, PreservedFile]
+
+
+class JsonArgumentParseError(Exception):
+    """argparse error that can be returned as one JSON payload."""
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise JsonArgumentParseError(message)
 
 
 def fail(message: str) -> NoReturn:
@@ -1204,11 +1249,17 @@ def read_file_snapshot(
         path, label, max_bytes=max_bytes, expected_mode=expected_mode
     )
     if info is None:
-        return FileSnapshot(None, None)
+        return FileSnapshot(None, None, None, None, None)
     data = read_existing_file(path, max_bytes=max_bytes, label=label)
     if data is None:
         fail(f"{label} disappeared while snapshotting")
-    return FileSnapshot(data, stat.S_IMODE(info.st_mode))
+    return FileSnapshot(
+        data,
+        stat.S_IMODE(info.st_mode),
+        int(info.st_mtime_ns),
+        int(info.st_dev),
+        int(info.st_ino),
+    )
 
 
 def file_matches_snapshot(
@@ -1225,7 +1276,15 @@ def file_matches_snapshot(
     if data != snapshot.data:
         return False
     info = path.lstat()
-    return not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) == snapshot.mode
+    if stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != snapshot.mode:
+        return False
+    if snapshot.dev is not None and info.st_dev != snapshot.dev:
+        return False
+    if snapshot.ino is not None and info.st_ino != snapshot.ino:
+        return False
+    if snapshot.mtime_ns is not None and info.st_mtime_ns != snapshot.mtime_ns:
+        return False
+    return True
 
 
 def retry_until_exact(label: str, matches: Any, action: Any) -> None:
@@ -1265,6 +1324,156 @@ def remove_file_until_absent_retry(path: Path, label: str) -> None:
         durable_unlink(path, label)
 
     retry_until_exact(label, matches, action)
+
+
+def preservation_stage_root(target: Path, label: str) -> Path:
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
+    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
+    digest = sha256_bytes(f"{label}\n{os.getpid()}\n{time.time_ns()}".encode("utf-8"))[:16]
+    root = control_tmp_dir(target) / f"rollback.{digest}"
+    ensure_private_directory(root, "NDDev rollback object store")
+    return root
+
+
+def file_identity_snapshot(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    reader: Any,
+    expected_mode: int | None = None,
+) -> FileSnapshot:
+    info = require_existing_managed_file(
+        path, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
+    if info is None:
+        return FileSnapshot(None, None, None, None, None)
+    data = reader(path, max_bytes=max_bytes, label=label)
+    if data is None:
+        fail(f"{label} disappeared while snapshotting")
+    return FileSnapshot(
+        data,
+        stat.S_IMODE(info.st_mode),
+        int(info.st_mtime_ns),
+        int(info.st_dev),
+        int(info.st_ino),
+    )
+
+
+def preserve_file_for_rollback(
+    target: Path,
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    reader: Any,
+    stage_root: Path,
+    expected_mode: int | None = None,
+) -> PreservedFile:
+    parent_mtime_ns = None
+    with contextlib.suppress(OSError):
+        parent_mtime_ns = int(path.parent.lstat().st_mtime_ns)
+    snapshot = file_identity_snapshot(
+        path,
+        max_bytes=max_bytes,
+        label=label,
+        reader=reader,
+        expected_mode=expected_mode,
+    )
+    if snapshot.data is None:
+        return PreservedFile(
+            target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, None
+        )
+    backup_path = (
+        stage_root / f"{len(list(stage_root.iterdir()))}.{sha256_bytes(str(path).encode('utf-8'))}"
+    )
+    if backup_path.exists() or backup_path.is_symlink():
+        fail(f"{label} rollback object already exists")
+    try:
+        os.replace(path, backup_path)
+    except OSError as exc:
+        fail(f"{label} rollback object preservation failed: {exc}")
+    fsync_directory(path.parent, f"{label} rollback object removal")
+    fsync_directory(backup_path.parent, f"{label} rollback object preservation")
+    return PreservedFile(
+        target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
+    )
+
+
+def restore_parent_mtime(entry: PreservedFile) -> None:
+    if entry.parent_mtime_ns is None:
+        return
+    with contextlib.suppress(OSError):
+        current = entry.path.parent.lstat()
+        os.utime(
+            entry.path.parent,
+            ns=(int(current.st_atime_ns), entry.parent_mtime_ns),
+            follow_symlinks=False,
+        )
+
+
+def restore_preserved_file_once(entry: PreservedFile) -> None:
+    if entry.snapshot.data is None:
+        remove_file_until_absent_retry(entry.path, f"{entry.label} rollback absent")
+        restore_parent_mtime(entry)
+        return
+    if entry.backup_path is None:
+        fail(f"{entry.label} rollback object is missing")
+    if file_matches_snapshot(
+        entry.path,
+        entry.snapshot,
+        max_bytes=entry.max_bytes,
+        label=entry.label,
+        reader=read_existing_file,
+    ):
+        fsync_directory(entry.path.parent, f"{entry.label} rollback")
+        restore_parent_mtime(entry)
+        return
+    if entry.path.exists() or entry.path.is_symlink():
+        durable_unlink(entry.path, f"{entry.label} rollback replacement")
+    ensure_private_parent(entry.path, entry.target)
+    if not (entry.backup_path.exists() or entry.backup_path.is_symlink()):
+        fail(f"{entry.label} rollback object disappeared")
+    try:
+        os.replace(entry.backup_path, entry.path)
+    except OSError as exc:
+        fail(f"{entry.label} rollback object restore failed: {exc}")
+    fsync_directory(entry.path.parent, f"{entry.label} rollback restore")
+    restore_parent_mtime(entry)
+
+
+def restore_preserved_files_retry(entries: dict[str, PreservedFile]) -> None:
+    for key in reversed(tuple(entries)):
+        entry = entries[key]
+        retry_until_exact(
+            f"{entry.label} object rollback",
+            lambda item=entry: file_matches_snapshot(
+                item.path,
+                item.snapshot,
+                max_bytes=item.max_bytes,
+                label=item.label,
+                reader=read_existing_file,
+            ),
+            lambda item=entry: restore_preserved_file_once(item),
+        )
+
+
+def cleanup_preserved_files_retry(entries: dict[str, PreservedFile], stage_root: Path) -> None:
+    for entry in entries.values():
+        if entry.stage_root == stage_root and entry.backup_path is not None:
+            remove_file_until_absent_retry(entry.backup_path, f"{entry.label} rollback cleanup")
+    restore_tree_retry(
+        stage_root,
+        {".": TreeEntry("absent", None, None)},
+        max_bytes=SOFTWARE_MAX_BYTES,
+        label="rollback object store",
+    )
+
+
+def cleanup_preserved_stage_roots_retry(entries: dict[str, PreservedFile]) -> None:
+    roots = {entry.stage_root for entry in entries.values()}
+    for root in roots:
+        cleanup_preserved_files_retry(entries, root)
 
 
 def restore_atomic_replace_snapshot_retry(
@@ -1463,15 +1672,18 @@ def runtime_platform_result(
     reason: str | None = None,
 ) -> RuntimePlatformInfo:
     host_id = supported_host_id(platform_id, architecture, libc_family)
+    vendor_installer_asset = (
+        VENDOR_INSTALLER_ASSET_BY_HOST_ID.get(host_id) if host_id is not None else None
+    )
+    if platform_id == "windows":
+        vendor_installer_asset = VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH.get(architecture)
     return RuntimePlatformInfo(
         system=system,
         platform_id=platform_id,
         host_id=host_id or platform_id,
         architecture=architecture,
         host_architecture=HOST_ARCH_BY_MACHINE_ARCH.get(architecture),
-        vendor_installer_asset=(
-            VENDOR_INSTALLER_ASSET_BY_HOST_ID.get(host_id) if host_id is not None else None
-        ),
+        vendor_installer_asset=vendor_installer_asset,
         libc_family=libc_family,
         libc_version=libc_version,
         linux_id=linux_id,
@@ -1599,6 +1811,11 @@ def require_supported_runtime_platform(
     if not checked.supported:
         fail(checked.reason or "unsupported platform for nddev-grok-build-app runtime management")
     return checked
+
+
+def require_command_supported_host(command: str) -> None:
+    if command in HOST_PREFLIGHT_COMMANDS:
+        require_supported_runtime_platform()
 
 
 def extract_managed_block(text: str) -> str | None:
@@ -1864,6 +2081,7 @@ def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 
 def status_payload(target: Path) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with bootstrap_lifecycle_lock(target):
         return status_payload_locked(target)
 
@@ -1934,7 +2152,8 @@ def status_payload_locked(target: Path) -> dict[str, Any]:
 
 
 def snapshot_files(
-    target: Path, extra_paths: tuple[str, ...] | list[str] | None = None
+    target: Path,
+    extra_paths: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, FileSnapshot]:
     snapshot: dict[str, FileSnapshot] = {}
     paths = list(content_managed_paths())
@@ -1945,6 +2164,26 @@ def snapshot_files(
             safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
         )
     return snapshot
+
+
+def preserve_managed_files(
+    target: Path, relative_paths: tuple[str, ...] | list[str], *, label: str
+) -> dict[str, PreservedFile]:
+    unique = tuple(dict.fromkeys(relative_paths))
+    if not unique:
+        return {}
+    stage_root = preservation_stage_root(target, label)
+    preserved: dict[str, PreservedFile] = {}
+    for relative in unique:
+        preserved[relative] = preserve_file_for_rollback(
+            target,
+            safe_target_path(target, relative),
+            label=relative,
+            max_bytes=MANAGED_MAX_BYTES,
+            reader=read_existing_file,
+            stage_root=stage_root,
+        )
+    return preserved
 
 
 def managed_files_match_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> bool:
@@ -1973,6 +2212,7 @@ def restore_snapshot_once(target: Path, snapshot: dict[str, FileSnapshot]) -> No
 
 
 def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
+    restore_snapshot_once(target, snapshot)
     retry_until_exact(
         "managed file rollback",
         lambda: managed_files_match_snapshot(target, snapshot),
@@ -2154,19 +2394,31 @@ def restore_tree_retry(
 
 
 def snapshot_lifecycle_state(
-    target: Path, extra_paths: tuple[str, ...] | list[str] | None = None
+    target: Path,
+    extra_paths: tuple[str, ...] | list[str] | None = None,
+    preserve_paths: tuple[str, ...] | list[str] | None = None,
 ) -> LifecycleSnapshot:
+    backup_pool_snapshot = snapshot_tree(
+        backup_pool(target), max_bytes=METADATA_MAX_BYTES, label="backup pool"
+    )
+    control_tmp_snapshot = snapshot_tree(
+        control_tmp_dir(target), max_bytes=METADATA_MAX_BYTES, label="control tmp"
+    )
+    launch_images_snapshot = snapshot_tree(
+        launch_image_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="launch images"
+    )
+    files_snapshot = snapshot_files(target, extra_paths=extra_paths)
+    preserved = preserve_managed_files(
+        target,
+        tuple(preserve_paths or ()),
+        label="managed lifecycle rollback",
+    )
     return LifecycleSnapshot(
-        files=snapshot_files(target, extra_paths=extra_paths),
-        backup_pool=snapshot_tree(
-            backup_pool(target), max_bytes=METADATA_MAX_BYTES, label="backup pool"
-        ),
-        control_tmp=snapshot_tree(
-            control_tmp_dir(target), max_bytes=METADATA_MAX_BYTES, label="control tmp"
-        ),
-        launch_images=snapshot_tree(
-            launch_image_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="launch images"
-        ),
+        files=files_snapshot,
+        backup_pool=backup_pool_snapshot,
+        control_tmp=control_tmp_snapshot,
+        launch_images=launch_images_snapshot,
+        preserved_files=preserved,
     )
 
 
@@ -2195,6 +2447,7 @@ def lifecycle_matches_snapshot(target: Path, snapshot: LifecycleSnapshot) -> boo
 
 
 def restore_lifecycle_snapshot_once(target: Path, snapshot: LifecycleSnapshot) -> None:
+    restore_preserved_files_retry(snapshot.preserved_files)
     restore_snapshot(target, snapshot.files)
     restore_tree_retry(
         backup_pool(target), snapshot.backup_pool, max_bytes=METADATA_MAX_BYTES, label="backup pool"
@@ -2214,11 +2467,13 @@ def restore_lifecycle_snapshot_once(target: Path, snapshot: LifecycleSnapshot) -
 
 
 def restore_lifecycle_snapshot_retry(target: Path, snapshot: LifecycleSnapshot) -> None:
+    restore_lifecycle_snapshot_once(target, snapshot)
     retry_until_exact(
         "managed lifecycle rollback",
         lambda: lifecycle_matches_snapshot(target, snapshot),
         lambda: restore_lifecycle_snapshot_once(target, snapshot),
     )
+    cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
 
 
 def choose_backup_slot(pool: Path) -> int:
@@ -2306,19 +2561,37 @@ def commit_backup_transaction(target: Path, transaction: BackupTransaction | Non
     ensure_private_directory(slot_dir, "backup slot")
     envelope_path = slot_dir / BACKUP_NAME
     expected = canonical_json(transaction.envelope)
-    atomic_write(envelope_path, expected, slot_dir)
-    actual = read_existing_file(
-        envelope_path,
-        max_bytes=METADATA_MAX_BYTES,
-        label=BACKUP_NAME,
-        expected_mode=OWNER_FILE_MODE,
-    )
-    if actual != expected:
-        fail("committed backup bytes do not match the staged envelope")
-    written = decode_json_bytes(actual, BACKUP_NAME)
-    validate_backup_envelope(target, transaction.slot, written)
-    cleanup_backup_transaction_stage(transaction)
-    return transaction.slot
+    preserved = {
+        BACKUP_NAME: preserve_file_for_rollback(
+            target,
+            envelope_path,
+            label=BACKUP_NAME,
+            max_bytes=METADATA_MAX_BYTES,
+            reader=read_existing_file,
+            stage_root=preservation_stage_root(target, "backup slot rollback"),
+            expected_mode=OWNER_FILE_MODE,
+        )
+    }
+    try:
+        atomic_write(envelope_path, expected, slot_dir)
+        actual = read_existing_file(
+            envelope_path,
+            max_bytes=METADATA_MAX_BYTES,
+            label=BACKUP_NAME,
+            expected_mode=OWNER_FILE_MODE,
+        )
+        if actual != expected:
+            fail("committed backup bytes do not match the staged envelope")
+        written = decode_json_bytes(actual, BACKUP_NAME)
+        validate_backup_envelope(target, transaction.slot, written)
+        cleanup_backup_transaction_stage(transaction)
+        cleanup_preserved_stage_roots_retry(preserved)
+        return transaction.slot
+    except BaseException:
+        restore_preserved_files_retry(preserved)
+        cleanup_preserved_stage_roots_retry(preserved)
+        cleanup_backup_transaction_stage(transaction)
+        raise
 
 
 def rollback_backup_transaction(target: Path, transaction: BackupTransaction | None) -> None:
@@ -2563,12 +2836,20 @@ def removed_paths_for_stamp_replacement(
     return sorted(set(managed) - set(files))
 
 
-def remove_managed_path(target: Path, relative: str) -> None:
+def remove_managed_path(
+    target: Path, relative: str, preserved_files: dict[str, PreservedFile] | None = None
+) -> None:
     path = safe_target_path(target, relative)
     if relative in MERGED_MARKER_PATHS:
-        remove_managed_block_from_target(target, relative)
+        preserved = preserved_files.get(relative) if preserved_files is not None else None
+        remove_managed_block_from_target(
+            target,
+            relative,
+            source_data=preserved.snapshot.data if preserved is not None else None,
+        )
     else:
-        durable_unlink(path, relative)
+        if path.exists() or path.is_symlink():
+            durable_unlink(path, relative)
 
 
 def write_setup(
@@ -2578,6 +2859,7 @@ def write_setup(
     *,
     require_existing: bool = False,
 ) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with target_lock(target, create=not require_existing) as target:
         current = read_stamp(target)
         if require_existing and current is None:
@@ -2592,13 +2874,7 @@ def write_setup(
         desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
         changed = changed_paths_for_desired_files(target, current, files)
         removed = removed_paths_for_stamp_replacement(current, files)
-        if (
-            current is not None
-            and current["setup_id"] == setup["id"]
-            and current["profile_id"] == profile["id"]
-            and not changed
-            and not removed
-        ):
+        if current is not None and current == desired_stamp and not changed and not removed:
             return {
                 "setup_id": setup["id"],
                 "profile_id": profile["id"],
@@ -2608,7 +2884,8 @@ def write_setup(
                 "target": str(validate_target(target, create=False)),
             }
         snapshot = snapshot_lifecycle_state(
-            target, extra_paths=sorted(current["managed_files"]) if current is not None else None
+            target,
+            extra_paths=sorted(current["managed_files"]) if current is not None else None,
         )
         try:
             backup_transaction = None
@@ -2616,15 +2893,23 @@ def write_setup(
                 current["setup_id"] != setup["id"] or current["profile_id"] != profile["id"]
             ):
                 backup_transaction = begin_backup_transaction(target, current)
+            snapshot = snapshot._replace(
+                preserved_files=preserve_managed_files(
+                    target,
+                    sorted({*changed, *removed, STAMP_NAME}),
+                    label="managed lifecycle rollback",
+                )
+            )
             for relative in removed:
-                remove_managed_path(target, relative)
-            for relative, data in files.items():
+                remove_managed_path(target, relative, snapshot.preserved_files)
+            for relative in changed:
+                data = files[relative]
                 atomic_write(safe_target_path(target, relative), data, target)
             atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
             prune_empty_managed_dirs(target)
             validate_intended_setup_state(target, desired_stamp, files)
             backup_slot = commit_backup_transaction(target, backup_transaction)
-            validate_intended_setup_state(target, desired_stamp, files)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
         except BaseException:
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
@@ -2638,11 +2923,67 @@ def write_setup(
         }
 
 
+def update_setup(target: Path) -> dict[str, Any]:
+    require_supported_runtime_platform()
+    with target_lock(target, create=False) as target:
+        current = read_stamp(target)
+        if current is None:
+            fail("update requires an already managed target")
+        if is_legacy_stamp(current):
+            fail("target uses legacy managed state; run migrate, restore, or remove")
+        drift = drift_for_stamp(target, current)
+        if drift:
+            fail(f"managed target has drift: {', '.join(drift)}")
+        setup = load_setup(current["setup_id"])
+        profile = load_profile(current["profile_id"])
+        files = desired_files(target, setup, profile)
+        desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
+        changed = changed_paths_for_desired_files(target, current, files)
+        removed = removed_paths_for_stamp_replacement(current, files)
+        if current == desired_stamp and not changed and not removed:
+            return {
+                "setup_id": setup["id"],
+                "profile_id": profile["id"],
+                "operation": "current",
+                "changed": [],
+                "removed": [],
+                "backup_slot": None,
+                "target": str(validate_target(target, create=False)),
+            }
+        snapshot = snapshot_lifecycle_state(
+            target,
+            extra_paths=sorted(current["managed_files"]),
+            preserve_paths=sorted({*changed, *removed, STAMP_NAME}),
+        )
+        try:
+            for relative in removed:
+                remove_managed_path(target, relative, snapshot.preserved_files)
+            for relative in changed:
+                atomic_write(safe_target_path(target, relative), files[relative], target)
+            atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
+            prune_empty_managed_dirs(target)
+            validate_intended_setup_state(target, desired_stamp, files)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
+        except BaseException:
+            restore_lifecycle_snapshot_retry(target, snapshot)
+            raise
+        return {
+            "setup_id": setup["id"],
+            "profile_id": profile["id"],
+            "operation": "update",
+            "changed": changed,
+            "removed": removed,
+            "backup_slot": None,
+            "target": str(validate_target(target, create=False)),
+        }
+
+
 def migrate_setup(
     target: Path,
     setup: dict[str, Any],
     requested_profile_id: str | None,
 ) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with target_lock(target, create=False) as target:
         current = read_stamp(target)
         if current is None:
@@ -2658,18 +2999,28 @@ def migrate_setup(
         desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
         changed = changed_paths_for_desired_files(target, current, files)
         removed = removed_paths_for_stamp_replacement(current, files)
-        snapshot = snapshot_lifecycle_state(target, extra_paths=sorted(current["managed_files"]))
+        snapshot = snapshot_lifecycle_state(
+            target,
+            extra_paths=sorted(current["managed_files"]),
+        )
         try:
             backup_transaction = begin_backup_transaction(target, current)
+            snapshot = snapshot._replace(
+                preserved_files=preserve_managed_files(
+                    target,
+                    sorted({*changed, *removed, STAMP_NAME}),
+                    label="managed lifecycle rollback",
+                )
+            )
             for relative in removed:
-                remove_managed_path(target, relative)
-            for relative, data in files.items():
-                atomic_write(safe_target_path(target, relative), data, target)
+                remove_managed_path(target, relative, snapshot.preserved_files)
+            for relative in changed:
+                atomic_write(safe_target_path(target, relative), files[relative], target)
             atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
             prune_empty_managed_dirs(target)
             validate_intended_setup_state(target, desired_stamp, files)
             backup_slot = commit_backup_transaction(target, backup_transaction)
-            validate_intended_setup_state(target, desired_stamp, files)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
         except BaseException:
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
@@ -2685,6 +3036,7 @@ def migrate_setup(
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
+    require_supported_runtime_platform()
     if slot < 0 or slot > 9:
         fail("backup slot must be between 0 and 9")
     with target_lock(target, create=False) as target:
@@ -2705,13 +3057,18 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
                 "backup_slot": slot,
                 "target": str(validate_target(target, create=False)),
             }
-        snapshot = snapshot_lifecycle_state(target, extra_paths=sorted(files))
+        snapshot = snapshot_lifecycle_state(
+            target,
+            extra_paths=sorted(files),
+            preserve_paths=sorted(files),
+        )
         try:
             for relative, data in sorted(files.items()):
                 path = safe_target_path(target, relative)
                 atomic_write(path, data, target)
             prune_empty_managed_dirs(target)
             restored_stamp = validate_restored_backup_state(target, expected_stamp, files)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
         except BaseException:
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
@@ -2725,6 +3082,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
+    require_supported_runtime_platform()
     if not target.exists() and not target.is_symlink():
         validate_target(target, create=False)
         return {
@@ -2748,13 +3106,18 @@ def remove_setup(target: Path) -> dict[str, Any]:
         removed_setup_id = stamp["setup_id"]
         removed_profile_id = stamp.get("profile_id")
         removed = sorted(stamp["managed_files"])
-        snapshot = snapshot_lifecycle_state(target, extra_paths=sorted(stamp["managed_files"]))
+        snapshot = snapshot_lifecycle_state(
+            target,
+            extra_paths=sorted(stamp["managed_files"]),
+            preserve_paths=sorted({*stamp["managed_files"], STAMP_NAME}),
+        )
         try:
             for relative in removed:
-                remove_managed_path(target, relative)
+                remove_managed_path(target, relative, snapshot.preserved_files)
             durable_unlink(stamp_path(target), STAMP_NAME)
             prune_empty_managed_dirs(target)
             validate_removed_setup_state(target, removed)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
         except BaseException:
             restore_lifecycle_snapshot_retry(target, snapshot)
             raise
@@ -2768,9 +3131,15 @@ def remove_setup(target: Path) -> dict[str, Any]:
         }
 
 
-def remove_managed_block_from_target(target: Path, relative: str) -> None:
+def remove_managed_block_from_target(
+    target: Path, relative: str, *, source_data: bytes | None = None
+) -> None:
     path = safe_target_path(target, relative)
-    data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+    data = (
+        source_data
+        if source_data is not None
+        else read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+    )
     if data is None:
         return
     text = data.decode("utf-8")
@@ -3021,10 +3390,16 @@ def read_optional_software_file_for_atomic(
 
 def snapshot_optional_software_file(path: Path, label: str) -> FileSnapshot:
     if not path.exists() and not path.is_symlink():
-        return FileSnapshot(None, None)
+        return FileSnapshot(None, None, None, None, None)
     data = read_software_file(path, label)
     info = require_software_regular_file(path, label)
-    return FileSnapshot(data, stat.S_IMODE(info.st_mode))
+    return FileSnapshot(
+        data,
+        stat.S_IMODE(info.st_mode),
+        int(info.st_mtime_ns),
+        int(info.st_dev),
+        int(info.st_ino),
+    )
 
 
 def software_file_mode_is(path: Path, mode: int) -> bool:
@@ -3045,19 +3420,57 @@ def software_atomic_write(path: Path, data: bytes, target: Path, mode: int) -> N
     )
 
 
-def snapshot_software_state(target: Path) -> SoftwareSnapshot:
+def software_relative_path(target: Path, path: Path) -> str:
+    return path.relative_to(target).as_posix()
+
+
+def preserve_software_files(
+    target: Path, paths: tuple[Path, ...] | list[Path], *, label: str
+) -> dict[str, PreservedFile]:
+    unique = tuple(dict.fromkeys(paths))
+    if not unique:
+        return {}
+    stage_root = preservation_stage_root(target, label)
+    preserved: dict[str, PreservedFile] = {}
+    for path in unique:
+        relative = software_relative_path(target, path)
+        preserved[relative] = preserve_file_for_rollback(
+            target,
+            path,
+            label=relative,
+            max_bytes=SOFTWARE_MAX_BYTES,
+            reader=read_optional_software_file_for_atomic,
+            stage_root=stage_root,
+        )
+    return preserved
+
+
+def snapshot_software_state(
+    target: Path, preserve_paths: tuple[Path, ...] | list[Path] | None = None
+) -> SoftwareSnapshot:
+    software_root_snapshot = snapshot_tree(
+        software_root(target), max_bytes=SOFTWARE_MAX_BYTES, label="software root"
+    )
+    software_container_snapshot = snapshot_directory_entry(
+        software_container(target), ".nddev-software"
+    )
+    managed_binary_snapshot = snapshot_optional_software_file(managed_grok_path(target), "bin/grok")
+    managed_bin_dir_snapshot = snapshot_directory_entry(managed_grok_path(target).parent, "bin")
+    control_tmp_snapshot = snapshot_tree(
+        control_tmp_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="control tmp"
+    )
+    preserved = preserve_software_files(
+        target,
+        tuple(preserve_paths or ()),
+        label="software rollback",
+    )
     return SoftwareSnapshot(
-        software_root=snapshot_tree(
-            software_root(target), max_bytes=SOFTWARE_MAX_BYTES, label="software root"
-        ),
-        software_container_dir=snapshot_directory_entry(
-            software_container(target), ".nddev-software"
-        ),
-        managed_binary=snapshot_optional_software_file(managed_grok_path(target), "bin/grok"),
-        managed_bin_dir=snapshot_directory_entry(managed_grok_path(target).parent, "bin"),
-        control_tmp=snapshot_tree(
-            control_tmp_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="control tmp"
-        ),
+        software_root=software_root_snapshot,
+        software_container_dir=software_container_snapshot,
+        managed_binary=managed_binary_snapshot,
+        managed_bin_dir=managed_bin_dir_snapshot,
+        control_tmp=control_tmp_snapshot,
+        preserved_files=preserved,
     )
 
 
@@ -3092,6 +3505,7 @@ def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
 
 
 def restore_software_snapshot_once(target: Path, snapshot: SoftwareSnapshot) -> None:
+    restore_preserved_files_retry(snapshot.preserved_files)
     restore_tree_retry(
         software_root(target),
         snapshot.software_root,
@@ -3120,11 +3534,13 @@ def restore_software_snapshot_once(target: Path, snapshot: SoftwareSnapshot) -> 
 
 
 def restore_software_snapshot_retry(target: Path, snapshot: SoftwareSnapshot) -> None:
+    restore_software_snapshot_once(target, snapshot)
     retry_until_exact(
         "software rollback",
         lambda: software_matches_snapshot(target, snapshot),
         lambda: restore_software_snapshot_once(target, snapshot),
     )
+    cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
 
 
 def software_present_paths_from_snapshot(snapshot: SoftwareSnapshot) -> list[str]:
@@ -3401,6 +3817,7 @@ def software_directory_mode_drift(path: Path, label: str) -> str | None:
 
 
 def software_status(target: Path) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with bootstrap_lifecycle_lock(target):
         return software_status_locked(target)
 
@@ -3652,7 +4069,14 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     "managed_command": str(managed_grok_path(target).resolve(strict=False)),
                 }
             validate_safe_software_presence(target)
-            snapshot = snapshot_software_state(target)
+            snapshot = snapshot_software_state(
+                target,
+                preserve_paths=(
+                    software_tree_binary(target),
+                    managed_grok_path(target),
+                    software_stamp_path(target),
+                ),
+            )
             try:
                 installer, installer_sha256, installer_source = read_pinned_installer()
                 artifact = run_vendor_installer(
@@ -3692,6 +4116,7 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     label="control tmp",
                 )
                 validate_intended_software_state(target, stamp_bytes, artifact["binary"])
+                cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
             except BaseException:
                 restore_software_snapshot_retry(target, snapshot)
                 raise
@@ -3746,7 +4171,13 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
                 "managed_command": str(managed_grok_path(target).resolve(strict=False)),
             }
         validate_safe_software_presence(target)
-        snapshot = snapshot_software_state(target)
+        preserve_paths = [managed_grok_path(target)]
+        if software_root(target).exists() and not software_root(target).is_symlink():
+            for path in sorted(software_root(target).rglob("*")):
+                info = stat_existing(path, f"software removal path {path}")
+                if info is not None and stat.S_ISREG(info.st_mode):
+                    preserve_paths.append(path)
+        snapshot = snapshot_software_state(target, preserve_paths=preserve_paths)
         removed = software_present_paths_from_snapshot(snapshot)
         try:
             remove_grok_software_state_once(target)
@@ -3757,6 +4188,7 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
                 label="control tmp",
             )
             validate_removed_software_state(target)
+            cleanup_preserved_stage_roots_retry(snapshot.preserved_files)
         except BaseException:
             restore_software_snapshot_retry(target, snapshot)
             raise
@@ -3774,6 +4206,7 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
 
 
 def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    require_supported_runtime_platform()
     with bootstrap_lifecycle_lock(target):
         status = status_payload_locked(target)
         canonical_target = validate_target(target, create=False)
@@ -3972,8 +4405,10 @@ def launch(target: Path, child_args: list[str]) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = JsonArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, parser_class=JsonArgumentParser
+    )
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--json", action="store_true")
     for name in (
@@ -3993,6 +4428,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("--profile", default=DEFAULT_PROFILE_ID)
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
+    update = subparsers.add_parser("update")
+    update.add_argument("--target", required=True)
+    update.add_argument("--json", action="store_true")
     migrate = subparsers.add_parser("migrate")
     migrate.add_argument("--setup", default=DEFAULT_SETUP_ID)
     migrate.add_argument("--profile")
@@ -4030,6 +4468,7 @@ def dispatch(args: argparse.Namespace) -> int:
             as_json=args.json,
         )
         return 0
+    require_command_supported_host(args.command)
     if args.command == "status":
         emit(status_payload(require_absolute_target(args.target)), as_json=args.json)
         return 0
@@ -4062,6 +4501,10 @@ def dispatch(args: argparse.Namespace) -> int:
             as_json=args.json,
         )
         return 0
+    if args.command == "update":
+        target = require_absolute_target(args.target)
+        emit(update_setup(target), as_json=args.json)
+        return 0
     if args.command == "migrate":
         target = require_absolute_target(args.target)
         emit(migrate_setup(target, load_setup(args.setup), args.profile), as_json=args.json)
@@ -4091,9 +4534,13 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        args = parse_args(raw_argv)
         return dispatch(args)
+    except JsonArgumentParseError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True))
+        return 2
     except GrokBuildSetupError as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         return 2

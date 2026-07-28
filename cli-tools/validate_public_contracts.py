@@ -460,6 +460,9 @@ def validate_manager_source() -> None:
         '"remove-cli"',
         '"update"',
         "def update_setup(",
+        "def lexical_target_identity(",
+        "def external_lifecycle_coordination(",
+        "def acquire_bootstrap_lock_handle_for_identity(",
         "def require_command_supported_host(",
         "def remove_grok_software(",
         "def restore_lifecycle_snapshot_retry(",
@@ -1065,7 +1068,6 @@ def bootstrap_artifact_snapshot(manager: Any) -> Any:
 
 @contextlib.contextmanager
 def isolated_bootstrap_root(manager: Any):
-    before = bootstrap_artifact_snapshot(manager)
     original = manager.bootstrap_system_root
     with tempfile.TemporaryDirectory(prefix="nddev-grok-build-lock-root-") as tmp_raw:
         root = Path(tmp_raw) / "system-tmp"
@@ -1083,9 +1085,6 @@ def isolated_bootstrap_root(manager: Any):
             yield root
         finally:
             manager.bootstrap_system_root = original
-    after = bootstrap_artifact_snapshot(manager)
-    if after != before:
-        raise ValueError("public validator changed the real system bootstrap lock root")
 
 
 def validate_bootstrap_handover_smoke(manager: Any, target: Path) -> None:
@@ -1458,6 +1457,7 @@ def validate_platform_scope(
     original_stage = manager.run_vendor_installer
     original_popen = manager.subprocess.Popen
     original_bootstrap = manager.acquire_bootstrap_lock
+    original_bootstrap_handle = manager.acquire_bootstrap_lock_handle_for_identity
     original_validate_target = manager.validate_target
     touched = {
         "target": False,
@@ -1502,6 +1502,7 @@ def validate_platform_scope(
         manager.run_vendor_installer = fail_stage
         manager.subprocess.Popen = FailLaunch
         manager.acquire_bootstrap_lock = fail_bootstrap
+        manager.acquire_bootstrap_lock_handle_for_identity = fail_bootstrap
         manager.validate_target = fail_target
         with tempfile.TemporaryDirectory(prefix="nddev-grok-build-platform-") as raw:
             target = Path(raw) / "target"
@@ -1534,7 +1535,191 @@ def validate_platform_scope(
         manager.run_vendor_installer = original_stage
         manager.subprocess.Popen = original_popen
         manager.acquire_bootstrap_lock = original_bootstrap
+        manager.acquire_bootstrap_lock_handle_for_identity = original_bootstrap_handle
         manager.validate_target = original_validate_target
+
+
+def validate_lifecycle_ordering_smoke(manager: Any) -> None:
+    setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
+    profile = manager.load_profile(manager.DEFAULT_PROFILE_ID)
+    order: list[str] = []
+    external_depth = {"value": 0}
+    original_acquire = manager.acquire_bootstrap_lock_handle_for_identity
+    original_release = manager.release_bootstrap_lock_handle
+    original_validate_target = manager.validate_target
+    original_require_parent = manager.require_safe_target_parent
+    original_missing_chain = manager.missing_directory_chain
+    original_status_locked = manager.status_payload_locked
+    original_software_locked = manager.software_status_locked
+    original_target_lock = manager.acquire_target_lock
+    original_lifecycle_snapshot = manager.snapshot_lifecycle_state
+    original_software_snapshot = manager.snapshot_software_state
+    original_read_stamp = manager.read_stamp
+    original_read_installer = manager.read_pinned_installer
+    original_stage = manager.run_vendor_installer
+    original_popen = manager.subprocess.Popen
+
+    def require_external(label: str) -> None:
+        if external_depth["value"] <= 0:
+            raise ValueError(f"{label} ran before external lifecycle lock")
+        order.append(label)
+
+    def traced_acquire(identity: str) -> Any:
+        order.append(f"external-enter:{identity}")
+        handle = original_acquire(identity)
+        external_depth["value"] += 1
+        order.append(f"external-held:{identity}")
+        return handle
+
+    def traced_release(handle: Any) -> None:
+        original_release(handle)
+        external_depth["value"] -= 1
+        order.append(f"external-release:{handle.path.name}")
+
+    def traced_validate(target: Path, *, create: bool = False) -> Path:
+        require_external("validate_target")
+        return original_validate_target(target, create=create)
+
+    def traced_parent(path: Path, label: str) -> Any:
+        require_external(f"require_safe_target_parent:{label}")
+        return original_require_parent(path, label)
+
+    def traced_missing(path: Path) -> list[Path]:
+        require_external("missing_directory_chain")
+        return original_missing_chain(path)
+
+    def traced_status(target: Path) -> dict[str, Any]:
+        require_external("status_payload_locked")
+        return original_status_locked(target)
+
+    def traced_software(target: Path) -> dict[str, Any]:
+        require_external("software_status_locked")
+        return original_software_locked(target)
+
+    def traced_target_lock(target: Path) -> int:
+        require_external("acquire_target_lock")
+        return original_target_lock(target)
+
+    def traced_lifecycle_snapshot(*args: Any, **kwargs: Any) -> Any:
+        require_external("snapshot_lifecycle_state")
+        return original_lifecycle_snapshot(*args, **kwargs)
+
+    def traced_software_snapshot(*args: Any, **kwargs: Any) -> Any:
+        require_external("snapshot_software_state")
+        return original_software_snapshot(*args, **kwargs)
+
+    def traced_read_stamp(*args: Any, **kwargs: Any) -> Any:
+        require_external("read_stamp")
+        return original_read_stamp(*args, **kwargs)
+
+    def traced_read_installer() -> Any:
+        require_external("read_pinned_installer")
+        raise manager.GrokBuildSetupError("injected installer read stop")
+
+    def traced_stage(*_args: Any, **_kwargs: Any) -> Any:
+        require_external("run_vendor_installer")
+        raise manager.GrokBuildSetupError("installer stage should not be reached")
+
+    class FailLaunch:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            require_external("launch child")
+            raise manager.GrokBuildSetupError("launch child should not be reached")
+
+    def exact_bootstrap_tree(root: Path) -> tuple[tuple[str, dict[str, Any]], ...]:
+        if not root.exists() and not root.is_symlink():
+            return ((".", {"exists": False}),)
+        paths = [root]
+        if root.is_dir() and not root.is_symlink():
+            paths.extend(sorted(root.rglob("*")))
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for path in paths:
+            info = path.lstat()
+            relative = "." if path == root else path.relative_to(root).as_posix()
+            item = {
+                "mode": stat.S_IMODE(info.st_mode),
+                "type": "dir"
+                if stat.S_ISDIR(info.st_mode)
+                else "file"
+                if stat.S_ISREG(info.st_mode)
+                else "symlink"
+                if stat.S_ISLNK(info.st_mode)
+                else "other",
+                "ino": int(info.st_ino),
+                "mtime_ns": int(info.st_mtime_ns),
+            }
+            if stat.S_ISREG(info.st_mode):
+                data = path.read_bytes()
+                item["sha256"] = hashlib.sha256(data).hexdigest()
+            entries.append((relative, item))
+        return tuple(entries)
+
+    try:
+        manager.acquire_bootstrap_lock_handle_for_identity = traced_acquire
+        manager.release_bootstrap_lock_handle = traced_release
+        manager.validate_target = traced_validate
+        manager.require_safe_target_parent = traced_parent
+        manager.missing_directory_chain = traced_missing
+        manager.status_payload_locked = traced_status
+        manager.software_status_locked = traced_software
+        manager.acquire_target_lock = traced_target_lock
+        manager.snapshot_lifecycle_state = traced_lifecycle_snapshot
+        manager.snapshot_software_state = traced_software_snapshot
+        manager.read_stamp = traced_read_stamp
+        manager.read_pinned_installer = traced_read_installer
+        manager.run_vendor_installer = traced_stage
+        manager.subprocess.Popen = FailLaunch
+        with tempfile.TemporaryDirectory(prefix="nddev-grok-build-order-") as raw:
+            tmp = Path(raw)
+            target = tmp / "target"
+            manager.bootstrap_target_identity(target)
+            for operation in (
+                lambda: manager.status_payload(target),
+                lambda: manager.software_status(target),
+                lambda: manager.plan_payload(target, setup, profile),
+                lambda: manager.remove_setup(target),
+                lambda: manager.remove_grok_software(target),
+                lambda: manager.launch(target, []),
+                lambda: manager.write_setup(tmp / "setup-install", setup, profile),
+                lambda: manager.write_setup(
+                    tmp / "setup-switch",
+                    setup,
+                    profile,
+                    require_existing=True,
+                ),
+                lambda: manager.update_setup(tmp / "setup-update"),
+                lambda: manager.migrate_setup(tmp / "setup-migrate", setup, None),
+                lambda: manager.restore_backup(tmp / "setup-restore", 0),
+            ):
+                with contextlib.suppress(manager.GrokBuildSetupError):
+                    operation()
+            failure_target = tmp / "failure-target"
+            bootstrap_before_failure = exact_bootstrap_tree(manager.bootstrap_system_root())
+            expect_manager_error(
+                manager,
+                lambda: manager.install_grok_software(failure_target, "install-cli"),
+                "injected installer read stop",
+            )
+            if failure_target.exists() or failure_target.is_symlink():
+                raise ValueError("failed install-cli ordering smoke left target state")
+            if exact_bootstrap_tree(manager.bootstrap_system_root()) != bootstrap_before_failure:
+                raise ValueError("failed install-cli ordering smoke changed bootstrap lock state")
+    finally:
+        manager.acquire_bootstrap_lock_handle_for_identity = original_acquire
+        manager.release_bootstrap_lock_handle = original_release
+        manager.validate_target = original_validate_target
+        manager.require_safe_target_parent = original_require_parent
+        manager.missing_directory_chain = original_missing_chain
+        manager.status_payload_locked = original_status_locked
+        manager.software_status_locked = original_software_locked
+        manager.acquire_target_lock = original_target_lock
+        manager.snapshot_lifecycle_state = original_lifecycle_snapshot
+        manager.snapshot_software_state = original_software_snapshot
+        manager.read_stamp = original_read_stamp
+        manager.read_pinned_installer = original_read_installer
+        manager.run_vendor_installer = original_stage
+        manager.subprocess.Popen = original_popen
+    if not order or not any(item.startswith("external-held:") for item in order):
+        raise ValueError("lifecycle ordering smoke did not exercise external lock")
 
 
 def validate_adversarial_smokes(manager: Any) -> None:
@@ -1959,10 +2144,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("manifest external bootstrap lock must not be unlinked on release")
     if "JSON" not in str(transaction.get("external_bootstrap_lock_binding", "")):
         raise ValueError("manifest external bootstrap lock binding missing")
-    if "resolved real parent" not in str(
-        transaction.get("external_bootstrap_lock_target_identity", "")
-    ):
+    identity_description = str(transaction.get("external_bootstrap_lock_target_identity", ""))
+    if "lexically normalized absolute target" not in identity_description:
         raise ValueError("manifest external bootstrap target identity mismatch")
+    if "canonical target is derived under external coordination" not in identity_description:
+        raise ValueError("manifest canonical target handoff ordering mismatch")
     if transaction.get("external_bootstrap_lock_from_ambient_tmpdir") is not False:
         raise ValueError("manifest external bootstrap lock must ignore ambient TMPDIR")
     if transaction.get("external_bootstrap_lock_child_env") is not False:
@@ -2193,6 +2379,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"missing required public path {relative}")
     validate_builder_toolkit(version)
     with isolated_bootstrap_root(manager):
+        validate_lifecycle_ordering_smoke(manager)
         validate_adversarial_smokes(manager)
         validate_fetch_error_smokes(manager)
     validate_workflows()

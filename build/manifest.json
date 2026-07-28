@@ -303,7 +303,7 @@
     "external_bootstrap_lock_persistent": true,
     "external_bootstrap_lock_unlinked_on_release": false,
     "external_bootstrap_lock_binding": "JSON schema_version/product_name/namespace/canonical_target/lock_id after LOCK_EX",
-    "external_bootstrap_lock_target_identity": "resolved real parent plus literal target basename",
+    "external_bootstrap_lock_target_identity": "lexically normalized absolute target before filesystem inspection; canonical target is derived under external coordination",
     "external_bootstrap_lock_from_ambient_tmpdir": false,
     "external_bootstrap_lock_child_env": false,
     "external_lock_acquired_before_target_inspection": true,

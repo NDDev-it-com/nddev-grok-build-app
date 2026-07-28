@@ -302,6 +302,24 @@ class SoftwareSnapshot(NamedTuple):
     preserved_files: dict[str, PreservedFile]
 
 
+class BootstrapLockHandle(NamedTuple):
+    descriptor: int
+    path: Path
+    product_root: Path
+    system_root: Path
+    file_preexisting: bool
+    product_root_preexisting: bool
+    product_root_mtime_ns: int | None
+    system_root_mtime_ns: int | None
+
+
+class TargetCoordination(NamedTuple):
+    target: Path
+    created_parent_chain: list[Path]
+    remove_empty_target: bool
+    missing: bool
+
+
 class JsonArgumentParseError(Exception):
     """argparse error that can be returned as one JSON payload."""
 
@@ -342,6 +360,17 @@ def require_absolute_target(raw: str) -> Path:
     if target.name in ("", ".", ".."):
         fail("target must name a directory")
     return target
+
+
+def lexical_target_identity(target: Path) -> str:
+    if not target.is_absolute():
+        fail("target must be an absolute path")
+    normalized = Path(os.path.normpath(str(target)))
+    if not normalized.is_absolute():
+        fail("target must be an absolute path")
+    if normalized.name in ("", ".", ".."):
+        fail("target must name a directory")
+    return str(normalized)
 
 
 def stat_existing(path: Path, label: str) -> os.stat_result | None:
@@ -478,14 +507,7 @@ def ensure_bootstrap_product_root() -> Path:
 
 
 def bootstrap_target_identity(target: Path) -> str:
-    if not target.is_absolute():
-        fail("target must be an absolute path")
-    if target.name in ("", ".", ".."):
-        fail("target must name a directory")
-    parent = target.parent
-    require_safe_target_parent(parent, "target parent")
-    resolved_parent = parent.resolve(strict=True)
-    return str(resolved_parent / target.name)
+    return lexical_target_identity(target)
 
 
 def bootstrap_lock_digest(identity: str) -> str:
@@ -493,8 +515,12 @@ def bootstrap_lock_digest(identity: str) -> str:
     return sha256_bytes(payload)
 
 
+def bootstrap_lock_path_for_root(product_root: Path, identity: str) -> Path:
+    return product_root / bootstrap_lock_digest(identity)
+
+
 def bootstrap_lock_path(identity: str) -> Path:
-    return ensure_bootstrap_product_root() / bootstrap_lock_digest(identity)
+    return bootstrap_lock_path_for_root(ensure_bootstrap_product_root(), identity)
 
 
 def bootstrap_lock_binding(identity: str) -> dict[str, Any]:
@@ -584,9 +610,63 @@ def require_bootstrap_lock_descriptor(descriptor: int, path: Path) -> os.stat_re
     return opened
 
 
-def acquire_bootstrap_lock(target: Path) -> int:
-    identity = bootstrap_target_identity(target)
-    path = bootstrap_lock_path(identity)
+def cleanup_created_bootstrap_lock(handle: BootstrapLockHandle) -> None:
+    if not handle.file_preexisting and (handle.path.exists() or handle.path.is_symlink()):
+        durable_unlink(handle.path, "bootstrap lock")
+    if (
+        not handle.product_root_preexisting
+        and handle.product_root.exists()
+        and not handle.product_root.is_symlink()
+    ):
+        remove_empty_directory_if_created(handle.product_root, existed_before=False)
+    if handle.product_root_preexisting and handle.product_root_mtime_ns is not None:
+        restore_directory_mtime(
+            handle.product_root,
+            handle.product_root_mtime_ns,
+            "bootstrap lock root",
+        )
+    if not handle.product_root_preexisting and handle.system_root_mtime_ns is not None:
+        restore_directory_mtime(
+            handle.system_root,
+            handle.system_root_mtime_ns,
+            "bootstrap system lock root",
+        )
+
+
+def restore_directory_mtime(path: Path, mtime_ns: int, label: str) -> None:
+    try:
+        current = path.lstat()
+        os.utime(
+            path,
+            ns=(int(current.st_atime_ns), mtime_ns),
+            follow_symlinks=False,
+        )
+    except PermissionError:
+        return
+    except OSError as exc:
+        fail(f"{label} mtime restore failed: {exc}")
+    if stat.S_ISDIR(current.st_mode):
+        fsync_directory(path, f"{label} mtime restore")
+
+
+def acquire_bootstrap_lock_handle_for_identity(identity: str) -> BootstrapLockHandle:
+    system_root = bootstrap_system_root()
+    system_info = require_real_directory(system_root, "system bootstrap root")
+    system_root_mtime_ns = int(system_info.st_mtime_ns)
+    product_root = bootstrap_product_root_path(system_root)
+    product_root_preexisting = product_root.exists() or product_root.is_symlink()
+    if not product_root_preexisting:
+        try:
+            product_root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            product_root_preexisting = True
+        else:
+            product_root.chmod(OWNER_DIRECTORY_MODE)
+    require_private_directory(product_root, "bootstrap lock root")
+    product_root_info = product_root.lstat()
+    product_root_mtime_ns = int(product_root_info.st_mtime_ns) if product_root_preexisting else None
+    path = bootstrap_lock_path_for_root(product_root, identity)
+    file_preexisting = path.exists() or path.is_symlink()
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -598,6 +678,7 @@ def acquire_bootstrap_lock(target: Path) -> int:
         created = True
         os.fchmod(descriptor, OWNER_FILE_MODE)
     except FileExistsError:
+        file_preexisting = True
         flags = os.O_RDWR
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
@@ -609,6 +690,7 @@ def acquire_bootstrap_lock(target: Path) -> int:
             fail(f"bootstrap lock must be a regular owner-private file: {exc}")
     except OSError as exc:
         fail(f"bootstrap lock must be a regular owner-private file: {exc}")
+    handle: BootstrapLockHandle | None = None
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
@@ -625,7 +707,10 @@ def acquire_bootstrap_lock(target: Path) -> int:
                 fail(f"target is locked: {path}")
             fail(f"bootstrap lock failed: {exc}")
         opened = require_bootstrap_lock_descriptor(descriptor, path)
-        if read_bootstrap_lock_binding(descriptor, identity) is None:
+        binding = read_bootstrap_lock_binding(descriptor, identity)
+        if binding is None and not created:
+            fail("bootstrap lock binding is missing")
+        if binding is None:
             write_bootstrap_lock_binding(descriptor, identity)
             opened = require_bootstrap_lock_descriptor(descriptor, path)
             if read_bootstrap_lock_binding(
@@ -634,12 +719,38 @@ def acquire_bootstrap_lock(target: Path) -> int:
                 fail("bootstrap lock binding changed after writing")
         if created:
             os.fsync(descriptor)
-        return descriptor
+        handle = BootstrapLockHandle(
+            descriptor=descriptor,
+            path=path,
+            product_root=product_root,
+            system_root=system_root,
+            file_preexisting=file_preexisting,
+            product_root_preexisting=product_root_preexisting,
+            product_root_mtime_ns=product_root_mtime_ns,
+            system_root_mtime_ns=system_root_mtime_ns,
+        )
+        return handle
     except BaseException:
         with contextlib.suppress(OSError):
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+        if handle is None:
+            temporary_handle = BootstrapLockHandle(
+                descriptor=-1,
+                path=path,
+                product_root=product_root,
+                system_root=system_root,
+                file_preexisting=file_preexisting,
+                product_root_preexisting=product_root_preexisting,
+                product_root_mtime_ns=product_root_mtime_ns,
+                system_root_mtime_ns=system_root_mtime_ns,
+            )
+            cleanup_created_bootstrap_lock(temporary_handle)
         raise
+
+
+def acquire_bootstrap_lock(target: Path) -> int:
+    return acquire_bootstrap_lock_handle_for_identity(bootstrap_target_identity(target)).descriptor
 
 
 def release_bootstrap_lock(descriptor: int) -> None:
@@ -648,13 +759,44 @@ def release_bootstrap_lock(descriptor: int) -> None:
     os.close(descriptor)
 
 
+def release_bootstrap_lock_handle(handle: BootstrapLockHandle) -> None:
+    release_bootstrap_lock(handle.descriptor)
+
+
+def canonical_target_identity(target: Path) -> str:
+    return str(target)
+
+
+@contextlib.contextmanager
+def external_lifecycle_coordination(target: Path, *, create: bool, allow_missing: bool):
+    handles: list[BootstrapLockHandle] = []
+    failed = True
+    lexical_identity = bootstrap_target_identity(target)
+    try:
+        handles.append(acquire_bootstrap_lock_handle_for_identity(lexical_identity))
+        created_parent_chain = missing_directory_chain(target.parent)
+        remove_empty_target = create and not (target.exists() or target.is_symlink())
+        target = validate_target(target, create=create)
+        canonical_identity = canonical_target_identity(target)
+        if canonical_identity != lexical_identity:
+            handles.append(acquire_bootstrap_lock_handle_for_identity(canonical_identity))
+        missing = not (target.exists() or target.is_symlink())
+        if missing and not allow_missing:
+            fail("target is missing")
+        yield TargetCoordination(target, created_parent_chain, remove_empty_target, missing)
+        failed = False
+    finally:
+        for handle in reversed(handles):
+            release_bootstrap_lock_handle(handle)
+        if failed:
+            for handle in reversed(handles):
+                cleanup_created_bootstrap_lock(handle)
+
+
 @contextlib.contextmanager
 def bootstrap_lifecycle_lock(target: Path):
-    descriptor = acquire_bootstrap_lock(target)
-    try:
-        yield
-    finally:
-        release_bootstrap_lock(descriptor)
+    with external_lifecycle_coordination(target, create=False, allow_missing=True) as coordination:
+        yield coordination.target
 
 
 def managed_control_dir(target: Path) -> Path:
@@ -943,65 +1085,69 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
 
 
 @contextlib.contextmanager
-def target_lock(target: Path, *, create: bool):
+def target_lock(target: Path, *, create: bool, allow_missing: bool = False):
     created_parent_chain: list[Path] = []
     remove_empty_target = False
     control_preexisting = False
     lock_parent_preexisting = False
     lock_file_preexisting = False
-    bootstrap_descriptor: int | None = None
     descriptor: int | None = None
     locked_parent = False
     restore_error: BaseException | None = None
     failed = False
-    try:
-        bootstrap_descriptor = acquire_bootstrap_lock(target)
-        created_parent_chain = missing_directory_chain(target.parent)
-        remove_empty_target = create and not (target.exists() or target.is_symlink())
-        target = validate_target(target, create=create)
-        if not create and not target.exists() and not target.is_symlink():
-            fail("target is missing")
-        control_preexisting = (
-            managed_control_dir(target).exists() or managed_control_dir(target).is_symlink()
-        )
-        lock_parent_preexisting = (
-            lock_parent_dir(target).exists() or lock_parent_dir(target).is_symlink()
-        )
-        lock_file_preexisting = lock_path(target).exists() or lock_path(target).is_symlink()
-        descriptor = acquire_target_lock(target)
-        prepare_locked_lock_parent(target)
-        locked_parent = True
+    with external_lifecycle_coordination(
+        target, create=create, allow_missing=allow_missing
+    ) as coordination:
+        target = coordination.target
+        created_parent_chain = coordination.created_parent_chain
+        remove_empty_target = coordination.remove_empty_target
         try:
-            yield target
-        except BaseException:
-            failed = True
-            raise
-    finally:
-        if locked_parent:
-            try:
-                restore_unlocked_lock_parent(target)
-            except BaseException as exc:
-                restore_error = exc
-        if descriptor is not None:
-            with contextlib.suppress(OSError):
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-        if failed:
-            remove_created_target_lock_state(
-                target,
-                control_preexisting=control_preexisting,
-                lock_parent_preexisting=lock_parent_preexisting,
-                lock_file_preexisting=lock_file_preexisting,
+            if coordination.missing:
+                try:
+                    yield target
+                except BaseException:
+                    failed = True
+                    raise
+                return
+            control_preexisting = (
+                managed_control_dir(target).exists() or managed_control_dir(target).is_symlink()
             )
-        prune_empty_control_dirs(target)
-        if remove_empty_target:
-            remove_created_lock_state_if_empty(target)
-            remove_empty_directory_if_created(target, existed_before=False)
-        remove_created_empty_directories(created_parent_chain)
-        if bootstrap_descriptor is not None:
-            release_bootstrap_lock(bootstrap_descriptor)
-        if restore_error is not None:
-            raise restore_error
+            lock_parent_preexisting = (
+                lock_parent_dir(target).exists() or lock_parent_dir(target).is_symlink()
+            )
+            lock_file_preexisting = lock_path(target).exists() or lock_path(target).is_symlink()
+            descriptor = acquire_target_lock(target)
+            prepare_locked_lock_parent(target)
+            locked_parent = True
+            try:
+                yield target
+            except BaseException:
+                failed = True
+                raise
+        finally:
+            if locked_parent:
+                try:
+                    restore_unlocked_lock_parent(target)
+                except BaseException as exc:
+                    restore_error = exc
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+            if failed:
+                remove_created_target_lock_state(
+                    target,
+                    control_preexisting=control_preexisting,
+                    lock_parent_preexisting=lock_parent_preexisting,
+                    lock_file_preexisting=lock_file_preexisting,
+                )
+            prune_empty_control_dirs(target)
+            if remove_empty_target:
+                remove_created_lock_state_if_empty(target)
+                remove_empty_directory_if_created(target, existed_before=False)
+            remove_created_empty_directories(created_parent_chain)
+            if restore_error is not None:
+                raise restore_error
 
 
 def remove_created_target_lock_state(
@@ -2093,7 +2239,7 @@ def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 def status_payload(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target):
+    with bootstrap_lifecycle_lock(target) as target:
         return status_payload_locked(target)
 
 
@@ -3094,15 +3240,14 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 def remove_setup(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    if not target.exists() and not target.is_symlink():
-        validate_target(target, create=False)
-        return {
-            "removed_setup_id": None,
-            "changed": [],
-            "removed": [],
-            "target": str(validate_target(target, create=False)),
-        }
-    with target_lock(target, create=False) as target:
+    with target_lock(target, create=False, allow_missing=True) as target:
+        if not target.exists() and not target.is_symlink():
+            return {
+                "removed_setup_id": None,
+                "changed": [],
+                "removed": [],
+                "target": str(validate_target(target, create=False)),
+            }
         stamp = read_stamp(target)
         if stamp is None:
             return {
@@ -3829,7 +3974,7 @@ def software_directory_mode_drift(path: Path, label: str) -> str | None:
 
 def software_status(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target):
+    with bootstrap_lifecycle_lock(target) as target:
         return software_status_locked(target)
 
 
@@ -4058,7 +4203,6 @@ def run_vendor_installer(
 
 def install_grok_software(target: Path, command: str) -> dict[str, Any]:
     require_supported_runtime_platform()
-    before_target_exists = target.exists() or target.is_symlink()
     with target_lock(target, create=command == "install-cli") as target:
         try:
             status = software_status_locked(target)
@@ -4149,25 +4293,24 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 "managed_command": str(managed_grok_path(target).resolve(strict=False)),
             }
         except BaseException:
-            remove_empty_directory_if_created(target, before_target_exists)
             raise
 
 
 def remove_grok_software(target: Path) -> dict[str, Any]:
     require_supported_runtime_platform()
-    if not target.exists() and not target.is_symlink():
-        return {
-            "schema_version": 1,
-            "command": "remove-cli",
-            "operation": "absent",
-            "target": str(validate_target(target, create=False)),
-            "version": GROK_VERSION,
-            "current": False,
-            "changed": [],
-            "removed": [],
-            "managed_command": str(managed_grok_path(target).resolve(strict=False)),
-        }
-    with target_lock(target, create=False) as target:
+    with target_lock(target, create=False, allow_missing=True) as target:
+        if not target.exists() and not target.is_symlink():
+            return {
+                "schema_version": 1,
+                "command": "remove-cli",
+                "operation": "absent",
+                "target": str(validate_target(target, create=False)),
+                "version": GROK_VERSION,
+                "current": False,
+                "changed": [],
+                "removed": [],
+                "managed_command": str(managed_grok_path(target).resolve(strict=False)),
+            }
         status = software_status_locked(target)
         if not status["present"]:
             return {
@@ -4218,7 +4361,7 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
 
 def plan_payload(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target):
+    with bootstrap_lifecycle_lock(target) as target:
         status = status_payload_locked(target)
         canonical_target = validate_target(target, create=False)
         current = read_stamp(canonical_target) if status["managed"] else None

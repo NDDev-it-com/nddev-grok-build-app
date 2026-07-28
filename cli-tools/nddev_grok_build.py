@@ -11,6 +11,7 @@ import errno
 import fcntl
 import hashlib
 import http.client
+import io
 import json
 import os
 import platform
@@ -18,11 +19,12 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +76,17 @@ GROK_NPM_PACKAGE = "@xai-official/grok"
 GROK_NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
 GROK_NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
 GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
+GROK_NPM_TARBALL_MAX_BYTES = 1 * 1024 * 1024
+GROK_NPM_UNPACKED_SIZE = 17281
+GROK_NPM_FILE_COUNT = 4
+NPM_NATIVE_TARBALL_MAX_BYTES = 96 * 1024 * 1024
+NODE_MINIMUM_MAJOR = 20
+NODE_CANDIDATE_PATHS = (
+    Path("/opt/homebrew/bin/node"),
+    Path("/usr/local/bin/node"),
+    Path("/usr/bin/node"),
+    Path("/bin/node"),
+)
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
 INSTALLER_TIMEOUT_SECONDS = 120.0
@@ -222,6 +235,64 @@ VENDOR_INSTALLER_ASSET_BY_HOST_ID = {
 VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH = {
     "aarch64": "grok-0.2.112-windows-aarch64.exe",
     "x86_64": "grok-0.2.112-windows-x86_64.exe",
+}
+NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
+    "macos-arm64": {
+        "package": "@xai-official/grok-darwin-arm64",
+        "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+        "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+        "unpacked_size": 37113280,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+    },
+    "macos-x64": {
+        "package": "@xai-official/grok-darwin-x64",
+        "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+        "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+        "unpacked_size": 43142250,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+    },
+    "ubuntu-glibc-arm64": {
+        "package": "@xai-official/grok-linux-arm64",
+        "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+        "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+        "unpacked_size": 40192893,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+    },
+    "ubuntu-glibc-x64": {
+        "package": "@xai-official/grok-linux-x64",
+        "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+        "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+        "unpacked_size": 45242318,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+    },
+}
+NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS: dict[str, dict[str, Any]] = {
+    "@xai-official/grok-win32-x64": {
+        "integrity": "sha512-xrBENcmX2ChPmTOMiYod5nbVjkYcuPZ3/sFJ7OLUDHyjMYUME3NJUuN2sO8kBbYwGRvdiMO2D6AK6OJeUcmJow==",
+        "shasum": "b2e9df8e5ca0bd6e48783aafd4c904b411632109",
+        "unpacked_size": 40804870,
+    },
+    "@xai-official/grok-win32-arm64": {
+        "integrity": "sha512-LSQfzL3+engKov1WA/X3QLh7vxvftVFfZEe1twfkYs2iuTxyJ8rgd4JymYA0hP1SEX9RFryllNZSsHRkQqgF9A==",
+        "shasum": "fc45a94d5b627f89eab8489bbe1105172375a2a2",
+        "unpacked_size": 36877084,
+    },
 }
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 STAMP_KEYS_V1 = {
@@ -6074,6 +6145,12 @@ def remove_empty_directory_if_created(path: Path, existed_before: bool) -> None:
 def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
     if source != INSTALLER_URL:
         fail("Grok Build installer source must be the pinned official URL")
+    return read_pinned_https_bytes(
+        source, max_bytes=max_bytes, label="official Grok Build installer"
+    )
+
+
+def read_pinned_https_bytes(source: str, *, max_bytes: int, label: str) -> bytes:
     request = urllib.request.Request(source, headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -6083,9 +6160,11 @@ def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
                 try:
                     expected_length = int(expected_length_header)
                 except (TypeError, ValueError) as exc:
-                    fail(f"official Grok Build installer Content-Length is invalid: {exc}")
+                    fail(f"{label} Content-Length is invalid: {exc}")
                 if expected_length < 0:
-                    fail("official Grok Build installer Content-Length is invalid")
+                    fail(f"{label} Content-Length is invalid")
+                if expected_length > max_bytes:
+                    fail(f"{label} exceeds bounded read limit")
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -6094,15 +6173,15 @@ def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
                     break
                 total += len(chunk)
                 if total > max_bytes:
-                    fail("Grok Build installer exceeds bounded read limit")
+                    fail(f"{label} exceeds bounded read limit")
                 chunks.append(chunk)
     except GrokBuildSetupError:
         raise
     except (http.client.HTTPException, OSError, TimeoutError, urllib.error.URLError) as exc:
-        fail(f"official Grok Build installer fetch failed: {exc}")
+        fail(f"{label} fetch failed: {exc}")
     content = b"".join(chunks)
     if expected_length is not None and expected_length != len(content):
-        fail("Grok Build installer length changed while reading")
+        fail(f"{label} length changed while reading")
     return content
 
 
@@ -6138,11 +6217,388 @@ def read_pinned_installer() -> tuple[bytes, str, str]:
     return installer, digest, source
 
 
+def verify_npm_dist_payload(data: bytes, pin: dict[str, Any], label: str) -> str:
+    integrity = str(pin["integrity"])
+    algorithm, separator, digest_text = integrity.partition("-")
+    if separator != "-" or algorithm != "sha512":
+        fail(f"{label} npm integrity must be sha512")
+    try:
+        expected = base64.b64decode(digest_text.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError) as exc:
+        fail(f"{label} npm integrity is invalid: {exc}")
+    if hashlib.sha512(data).digest() != expected:
+        fail(f"{label} npm integrity mismatch")
+    shasum = str(pin["shasum"])
+    if not re.fullmatch(r"[0-9a-f]{40}", shasum):
+        fail(f"{label} npm shasum is invalid")
+    if hashlib.sha1(data).hexdigest() != shasum:
+        fail(f"{label} npm shasum mismatch")
+    return sha256_bytes(data)
+
+
+def read_verified_npm_tarball(
+    pin: dict[str, Any], *, label: str, max_bytes: int
+) -> tuple[bytes, str]:
+    source = str(pin["tarball"])
+    allowed = {
+        GROK_NPM_TARBALL,
+        *(str(item["tarball"]) for item in NPM_NATIVE_PACKAGE_BY_HOST_ID.values()),
+    }
+    if source not in allowed:
+        fail(f"{label} npm tarball source is not pinned")
+    data = read_pinned_https_bytes(source, max_bytes=max_bytes, label=label)
+    digest = verify_npm_dist_payload(data, pin, label)
+    return data, digest
+
+
+def safe_tgz_members(
+    data: bytes,
+    *,
+    expected_files: set[str],
+    expected_file_count: int,
+    expected_unpacked_size: int,
+    max_unpacked_size: int,
+    label: str,
+) -> dict[str, bytes]:
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+    except tarfile.TarError as exc:
+        fail(f"{label} npm archive is invalid: {exc}")
+    files: dict[str, bytes] = {}
+    total = 0
+    try:
+        for member in archive.getmembers():
+            name = member.name
+            parts = PurePosixPath(name).parts
+            if (
+                not name
+                or PurePosixPath(name).is_absolute()
+                or any(part in {"", ".", ".."} for part in parts)
+                or "\\" in name
+            ):
+                fail(f"{label} npm archive member path is unsafe: {name}")
+            if not member.isfile():
+                fail(f"{label} npm archive member is not a regular file: {name}")
+            if name in files:
+                fail(f"{label} npm archive contains duplicate member: {name}")
+            if name not in expected_files:
+                fail(f"{label} npm archive contains unexpected member: {name}")
+            if member.mode & 0o022 or member.mode & 0o7000:
+                fail(f"{label} npm archive member has unsafe mode: {name}")
+            if member.uid != 0 or member.gid != 0:
+                fail(f"{label} npm archive member owner is not root metadata: {name}")
+            if member.size < 0:
+                fail(f"{label} npm archive member size is invalid: {name}")
+            total += int(member.size)
+            if total > max_unpacked_size:
+                fail(f"{label} npm archive exceeds unpacked size bound")
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                fail(f"{label} npm archive member cannot be read: {name}")
+            payload = extracted.read(member.size + 1)
+            if len(payload) != member.size:
+                fail(f"{label} npm archive member changed while reading: {name}")
+            files[name] = payload
+    finally:
+        archive.close()
+    if set(files) != expected_files:
+        fail(f"{label} npm archive member set mismatch")
+    if len(files) != expected_file_count:
+        fail(f"{label} npm archive file count mismatch")
+    if total != expected_unpacked_size:
+        fail(f"{label} npm archive unpacked size mismatch")
+    return files
+
+
+def load_package_json_member(files: dict[str, bytes], label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(files["package/package.json"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"{label} package.json is invalid: {exc}")
+    if not isinstance(value, dict):
+        fail(f"{label} package.json must contain a JSON object")
+    return value
+
+
+def validate_umbrella_npm_package(files: dict[str, bytes]) -> dict[str, Any]:
+    package = load_package_json_member(files, "umbrella Grok Build npm package")
+    expected_optional = {
+        pin["package"]: GROK_VERSION for pin in NPM_NATIVE_PACKAGE_BY_HOST_ID.values()
+    }
+    expected_optional.update(
+        {package_name: GROK_VERSION for package_name in NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS}
+    )
+    if package.get("name") != GROK_NPM_PACKAGE or package.get("version") != GROK_VERSION:
+        fail("umbrella Grok Build npm package identity mismatch")
+    if package.get("bin") != {GROK_COMMAND: "bin/grok"}:
+        fail("umbrella Grok Build npm package bin mapping mismatch")
+    if package.get("engines") != {"node": ">=20"}:
+        fail("umbrella Grok Build npm package Node engine mismatch")
+    if package.get("scripts") != {"postinstall": "node bin/postinstall.js"}:
+        fail("umbrella Grok Build npm package script metadata mismatch")
+    if package.get("optionalDependencies") != expected_optional:
+        fail("umbrella Grok Build npm package optional dependency pins mismatch")
+    wrapper = files["package/bin/grok"]
+    if not wrapper.startswith(b"#!/usr/bin/env node\n"):
+        fail("umbrella Grok Build npm package wrapper is invalid")
+    return package
+
+
+def validate_native_npm_package(files: dict[str, bytes], pin: dict[str, Any]) -> dict[str, Any]:
+    package = load_package_json_member(files, "native Grok Build npm package")
+    if package.get("name") != pin["package"] or package.get("version") != GROK_VERSION:
+        fail("native Grok Build npm package identity mismatch")
+    if package.get("os") != [pin["os"]] or package.get("cpu") != [pin["cpu"]]:
+        fail("native Grok Build npm package platform mismatch")
+    if "scripts" in package:
+        fail("native Grok Build npm package must not define install scripts")
+    binary_member = str(pin["binary_member"])
+    if binary_member not in files or not files[binary_member]:
+        fail("native Grok Build npm package binary payload is missing")
+    return package
+
+
+def selected_native_npm_pin(platform_info: RuntimePlatformInfo) -> dict[str, Any]:
+    pin = NPM_NATIVE_PACKAGE_BY_HOST_ID.get(platform_info.host_id)
+    if pin is None:
+        fail(f"no pinned Grok Build npm package for host {platform_info.host_id}")
+    return pin
+
+
+def validate_node_runtime(path: Path) -> tuple[Path, str]:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        fail(f"Node runtime is missing: {path}")
+    try:
+        before = resolved.lstat()
+    except OSError as exc:
+        fail(f"Node runtime cannot be inspected: {resolved}: {exc}")
+    if not stat.S_ISREG(before.st_mode):
+        fail(f"Node runtime must resolve to a regular file: {resolved}")
+    if not os.access(resolved, os.X_OK):
+        fail(f"Node runtime is not executable: {resolved}")
+    try:
+        completed = subprocess.run(
+            [str(resolved), "--version"],
+            env=minimal_process_env(),
+            text=True,
+            input="",
+            capture_output=True,
+            check=False,
+            timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        fail(f"Node runtime disappeared while validating: {exc}")
+    except subprocess.TimeoutExpired:
+        fail("Node runtime version probe timed out")
+    if completed.returncode != 0:
+        fail("Node runtime version probe failed")
+    version = (completed.stdout + completed.stderr).strip()
+    match = re.fullmatch(r"v(\d+)\.\d+\.\d+(?:[-+].*)?", version)
+    if match is None or int(match.group(1)) < NODE_MINIMUM_MAJOR:
+        fail("Grok Build npm materialization requires Node >=20")
+    after = resolved.lstat()
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        stat.S_IMODE(after.st_mode),
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        stat.S_IMODE(before.st_mode),
+    ):
+        fail("Node runtime changed while validating")
+    return resolved, version
+
+
+def resolve_node_runtime() -> tuple[Path, str]:
+    first_error: str | None = None
+    for candidate in NODE_CANDIDATE_PATHS:
+        try:
+            return validate_node_runtime(candidate)
+        except GrokBuildSetupError as exc:
+            if first_error is None:
+                first_error = str(exc)
+    fail(first_error or "Grok Build npm materialization requires Node >=20")
+
+
+def decompress_brotli_with_node(
+    node_path: Path, node_version: str, compressed: bytes, stage: Path
+) -> bytes:
+    del node_version
+    compressed_path = stage / "grok.br"
+    output_path = stage / GROK_COMMAND
+    compressed_path.write_bytes(compressed)
+    compressed_path.chmod(OWNER_FILE_MODE)
+    fsync_directory(stage, "Grok Build npm materialization stage")
+    script = (
+        "const fs=require('fs');"
+        "const zlib=require('zlib');"
+        "const [src,dst,maxRaw]=process.argv.slice(1);"
+        "const raw=zlib.brotliDecompressSync(fs.readFileSync(src));"
+        "if(raw.length>Number(maxRaw)){process.stderr.write('too large');process.exit(2);}"
+        "fs.writeFileSync(dst,raw,{flag:'wx',mode:0o700});"
+        "fs.chmodSync(dst,0o700);"
+        "const fd=fs.openSync(dst,'r');"
+        "try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}"
+    )
+    try:
+        completed = subprocess.run(
+            [
+                str(node_path),
+                "-e",
+                script,
+                str(compressed_path),
+                str(output_path),
+                str(SOFTWARE_MAX_BYTES),
+            ],
+            cwd=stage,
+            env=minimal_process_env(tmp_dir=stage),
+            text=True,
+            input="",
+            capture_output=True,
+            check=False,
+            timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        fail(f"Node runtime disappeared while decompressing Grok Build binary: {exc}")
+    except subprocess.TimeoutExpired:
+        fail("Grok Build npm Brotli decompression timed out")
+    if completed.returncode != 0:
+        fail("Grok Build npm Brotli decompression failed: " + completed.stderr.strip())
+    output_path.chmod(OWNER_EXEC_MODE)
+    return read_software_file(output_path, f"Grok Build npm binary {output_path}")
+
+
+def verify_staged_binary(binary: bytes, stage: Path) -> str:
+    binary_path = stage / "probe-grok"
+    binary_path.write_bytes(binary)
+    binary_path.chmod(OWNER_EXEC_MODE)
+    fsync_directory(stage, "Grok Build npm binary probe stage")
+    probe_env = minimal_process_env(str(stage), tmp_dir=stage)
+    probe_home = stage / "probe-home"
+    probe_home.mkdir(mode=OWNER_DIRECTORY_MODE)
+    probe_home.chmod(OWNER_DIRECTORY_MODE)
+    probe_env["HOME"] = str(probe_home)
+    probe_env["GROK_HOME"] = str(probe_home)
+    try:
+        probe = subprocess.run(
+            [str(binary_path), "--version"],
+            cwd=stage,
+            env=probe_env,
+            text=True,
+            input="",
+            capture_output=True,
+            check=False,
+            timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        fail(f"Grok Build version probe executable is missing: {exc}")
+    except subprocess.TimeoutExpired:
+        fail("Grok Build version probe timed out")
+    version_output = (probe.stdout + probe.stderr).strip()
+    if probe.returncode != 0 or GROK_VERSION not in version_output:
+        fail("Grok Build npm binary did not report the pinned version")
+    return version_output
+
+
+def materialize_verified_npm_artifact(target: Path) -> dict[str, Any]:
+    platform_info = require_supported_runtime_platform()
+    native_pin = selected_native_npm_pin(platform_info)
+    node_path, node_version = resolve_node_runtime()
+    umbrella_pin = {
+        "package": GROK_NPM_PACKAGE,
+        "integrity": GROK_NPM_INTEGRITY,
+        "shasum": GROK_NPM_SHASUM,
+        "tarball": GROK_NPM_TARBALL,
+        "unpacked_size": GROK_NPM_UNPACKED_SIZE,
+        "file_count": GROK_NPM_FILE_COUNT,
+    }
+    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
+    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
+    with tempfile.TemporaryDirectory(prefix="npm.", dir=str(control_tmp_dir(target))) as stage_raw:
+        stage = Path(stage_raw)
+        stage.chmod(OWNER_DIRECTORY_MODE)
+        umbrella_tgz, umbrella_sha256 = read_verified_npm_tarball(
+            umbrella_pin,
+            label="umbrella Grok Build npm tarball",
+            max_bytes=GROK_NPM_TARBALL_MAX_BYTES,
+        )
+        native_tgz, native_sha256 = read_verified_npm_tarball(
+            native_pin,
+            label="native Grok Build npm tarball",
+            max_bytes=NPM_NATIVE_TARBALL_MAX_BYTES,
+        )
+        umbrella_files = safe_tgz_members(
+            umbrella_tgz,
+            expected_files={
+                "package/bin/grok",
+                "package/bin/postinstall.js",
+                "package/package.json",
+                "package/README.md",
+            },
+            expected_file_count=GROK_NPM_FILE_COUNT,
+            expected_unpacked_size=GROK_NPM_UNPACKED_SIZE,
+            max_unpacked_size=GROK_NPM_UNPACKED_SIZE,
+            label="umbrella Grok Build npm tarball",
+        )
+        native_files = safe_tgz_members(
+            native_tgz,
+            expected_files={
+                str(native_pin["binary_member"]),
+                "package/package.json",
+                "package/README.md",
+                "package/THIRD_PARTY_NOTICES.md",
+            },
+            expected_file_count=int(native_pin["file_count"]),
+            expected_unpacked_size=int(native_pin["unpacked_size"]),
+            max_unpacked_size=SOFTWARE_MAX_BYTES,
+            label="native Grok Build npm tarball",
+        )
+        validate_umbrella_npm_package(umbrella_files)
+        validate_native_npm_package(native_files, native_pin)
+        binary = decompress_brotli_with_node(
+            node_path,
+            node_version,
+            native_files[str(native_pin["binary_member"])],
+            stage,
+        )
+        version_output = verify_staged_binary(binary, stage)
+        return {
+            "binary": binary,
+            "binary_sha256": sha256_bytes(binary),
+            "version_output": version_output,
+            "install_mechanism": "verified-npm-tarball",
+            "installer_source": INSTALLER_URL,
+            "installer_sha256": INSTALLER_SHA256,
+            "npm_package": GROK_NPM_PACKAGE,
+            "npm_tarball": GROK_NPM_TARBALL,
+            "npm_integrity": GROK_NPM_INTEGRITY,
+            "npm_shasum": GROK_NPM_SHASUM,
+            "npm_tarball_sha256": umbrella_sha256,
+            "npm_tarball_size_bytes": len(umbrella_tgz),
+            "npm_unpacked_size": GROK_NPM_UNPACKED_SIZE,
+            "native_npm_package": native_pin["package"],
+            "native_npm_tarball": native_pin["tarball"],
+            "native_npm_integrity": native_pin["integrity"],
+            "native_npm_shasum": native_pin["shasum"],
+            "native_npm_tarball_sha256": native_sha256,
+            "native_npm_tarball_size_bytes": len(native_tgz),
+            "native_npm_unpacked_size": native_pin["unpacked_size"],
+            "node_path": str(node_path),
+            "node_version": node_version,
+        }
+
+
 def software_stamp(
     target: Path,
     *,
-    installer_source: str,
-    installer_sha256: str,
+    artifact: dict[str, Any],
     binary_sha256: str,
     version_output: str,
 ) -> dict[str, Any]:
@@ -6154,14 +6610,29 @@ def software_stamp(
         "command": GROK_COMMAND,
         "version": GROK_VERSION,
         "channel": GROK_CHANNEL,
-        "installer_url": installer_source,
-        "installer_sha256": installer_sha256,
+        "install_mechanism": "verified-npm-tarball",
+        "installer_url": artifact["installer_source"],
+        "installer_sha256": artifact["installer_sha256"],
+        "installer_observation_only": True,
         "installer_exact_version_arg": GROK_VERSION,
         "npm_package": GROK_NPM_PACKAGE,
         "npm_version": GROK_VERSION,
         "npm_integrity": GROK_NPM_INTEGRITY,
         "npm_shasum": GROK_NPM_SHASUM,
         "npm_tarball": GROK_NPM_TARBALL,
+        "npm_tarball_sha256": artifact["npm_tarball_sha256"],
+        "npm_tarball_size_bytes": artifact["npm_tarball_size_bytes"],
+        "npm_unpacked_size": artifact["npm_unpacked_size"],
+        "native_npm_package": artifact["native_npm_package"],
+        "native_npm_integrity": artifact["native_npm_integrity"],
+        "native_npm_shasum": artifact["native_npm_shasum"],
+        "native_npm_tarball": artifact["native_npm_tarball"],
+        "native_npm_tarball_sha256": artifact["native_npm_tarball_sha256"],
+        "native_npm_tarball_size_bytes": artifact["native_npm_tarball_size_bytes"],
+        "native_npm_unpacked_size": artifact["native_npm_unpacked_size"],
+        "node_path": artifact["node_path"],
+        "node_version": artifact["node_version"],
+        "package_scripts_disabled": True,
         "binary_sha256": binary_sha256,
         "version_output": version_output,
         "installed_at": int(time.time()),
@@ -6203,14 +6674,29 @@ def load_software_stamp(
         "command",
         "version",
         "channel",
+        "install_mechanism",
         "installer_url",
         "installer_sha256",
+        "installer_observation_only",
         "installer_exact_version_arg",
         "npm_package",
         "npm_version",
         "npm_integrity",
         "npm_shasum",
         "npm_tarball",
+        "npm_tarball_sha256",
+        "npm_tarball_size_bytes",
+        "npm_unpacked_size",
+        "native_npm_package",
+        "native_npm_integrity",
+        "native_npm_shasum",
+        "native_npm_tarball",
+        "native_npm_tarball_sha256",
+        "native_npm_tarball_size_bytes",
+        "native_npm_unpacked_size",
+        "node_path",
+        "node_version",
+        "package_scripts_disabled",
         "binary_sha256",
         "version_output",
         "installed_at",
@@ -6232,16 +6718,46 @@ def load_software_stamp(
                 fail(f"Grok Build software stamp {digest_key} must be a SHA-256 digest")
         if not isinstance(value["version"], str):
             fail("Grok Build software stamp version is invalid")
+        platform_info = require_supported_runtime_platform()
+        native_pin = selected_native_npm_pin(platform_info)
         if (
             value["channel"] != GROK_CHANNEL
+            or value["install_mechanism"] != "verified-npm-tarball"
+            or value["installer_observation_only"] is not True
             or value["installer_exact_version_arg"] != GROK_VERSION
             or value["npm_package"] != GROK_NPM_PACKAGE
             or value["npm_version"] != GROK_VERSION
             or value["npm_integrity"] != GROK_NPM_INTEGRITY
             or value["npm_shasum"] != GROK_NPM_SHASUM
             or value["npm_tarball"] != GROK_NPM_TARBALL
+            or value["npm_unpacked_size"] != GROK_NPM_UNPACKED_SIZE
+            or value["native_npm_package"] != native_pin["package"]
+            or value["native_npm_integrity"] != native_pin["integrity"]
+            or value["native_npm_shasum"] != native_pin["shasum"]
+            or value["native_npm_tarball"] != native_pin["tarball"]
+            or value["native_npm_unpacked_size"] != native_pin["unpacked_size"]
+            or value["package_scripts_disabled"] is not True
         ):
             fail("Grok Build software stamp provenance is invalid")
+        for digest_key in ("npm_tarball_sha256", "native_npm_tarball_sha256"):
+            if not isinstance(value[digest_key], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", value[digest_key]
+            ):
+                fail(f"Grok Build software stamp {digest_key} must be a SHA-256 digest")
+        for size_key in ("npm_tarball_size_bytes", "native_npm_tarball_size_bytes"):
+            if not isinstance(value[size_key], int) or value[size_key] <= 0:
+                fail(f"Grok Build software stamp {size_key} is invalid")
+        if (
+            value["npm_tarball_size_bytes"] > GROK_NPM_TARBALL_MAX_BYTES
+            or value["native_npm_tarball_size_bytes"] > NPM_NATIVE_TARBALL_MAX_BYTES
+        ):
+            fail("Grok Build software stamp tarball size exceeds bounds")
+        if not isinstance(value["node_path"], str) or not value["node_path"].startswith("/"):
+            fail("Grok Build software stamp node_path is invalid")
+        if not isinstance(value["node_version"], str) or not re.fullmatch(
+            r"v\d+\.\d+\.\d+(?:[-+].*)?", value["node_version"]
+        ):
+            fail("Grok Build software stamp node_version is invalid")
         if (
             not isinstance(value["version_output"], str)
             or GROK_VERSION not in value["version_output"]
@@ -6378,15 +6894,29 @@ def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> di
             "build_version": VERSION,
             "version": GROK_VERSION,
             "channel": GROK_CHANNEL,
+            "install_mechanism": "verified-npm-tarball",
             "installer_url": INSTALLER_URL,
             "installer_sha256": INSTALLER_SHA256,
+            "installer_observation_only": True,
             "installer_exact_version_arg": GROK_VERSION,
             "npm_package": GROK_NPM_PACKAGE,
             "npm_version": GROK_VERSION,
             "npm_integrity": GROK_NPM_INTEGRITY,
             "npm_shasum": GROK_NPM_SHASUM,
             "npm_tarball": GROK_NPM_TARBALL,
+            "npm_unpacked_size": GROK_NPM_UNPACKED_SIZE,
+            "package_scripts_disabled": True,
         }
+        native_pin = selected_native_npm_pin(require_supported_runtime_platform())
+        expected.update(
+            {
+                "native_npm_package": native_pin["package"],
+                "native_npm_integrity": native_pin["integrity"],
+                "native_npm_shasum": native_pin["shasum"],
+                "native_npm_tarball": native_pin["tarball"],
+                "native_npm_unpacked_size": native_pin["unpacked_size"],
+            }
+        )
         for key, expected_value in expected.items():
             if stamp[key] != expected_value:
                 drift.append(key)
@@ -6420,92 +6950,6 @@ def validate_safe_software_presence(target: Path) -> None:
             info = require_software_regular_file(file_path, label, max_bytes=SOFTWARE_MAX_BYTES)
             if stat.S_IMODE(info.st_mode) != mode:
                 fail(f"{label} must have mode {mode:04o}")
-
-
-def run_vendor_installer(
-    installer: bytes, installer_source: str, installer_sha256: str, target: Path
-) -> dict[str, Any]:
-    require_control_directory(managed_control_dir(target), "NDDev control root", allow_locked=False)
-    ensure_private_directory(control_tmp_dir(target), "NDDev control tmp")
-    with tempfile.TemporaryDirectory(
-        prefix="installer.", dir=str(control_tmp_dir(target))
-    ) as stage_raw:
-        stage = Path(stage_raw)
-        home = stage / "home"
-        bin_dir = stage / "bin"
-        grok_home = stage / "grok-home"
-        tmp_dir = stage / "tmp"
-        for directory in (home, bin_dir, grok_home, tmp_dir):
-            directory.mkdir(mode=OWNER_DIRECTORY_MODE)
-            directory.chmod(OWNER_DIRECTORY_MODE)
-        installer_path = stage / "install.sh"
-        installer_path.write_bytes(installer)
-        installer_path.chmod(OWNER_EXEC_MODE)
-        env = minimal_process_env(str(bin_dir), tmp_dir=tmp_dir)
-        env.update(
-            {
-                "HOME": str(home),
-                "GROK_HOME": str(grok_home),
-                "GROK_BIN_DIR": str(bin_dir),
-                "GROK_CHANNEL": GROK_CHANNEL,
-                "SHELL": "",
-            }
-        )
-        try:
-            completed = subprocess.run(
-                ["bash", str(installer_path), GROK_VERSION],
-                cwd=stage,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=INSTALLER_TIMEOUT_SECONDS,
-            )
-        except FileNotFoundError as exc:
-            missing = exc.filename or "bash"
-            fail(f"Grok Build vendor installer runner is missing: {missing}")
-        except subprocess.TimeoutExpired:
-            fail("Grok Build vendor installer timed out")
-        if completed.returncode != 0:
-            fail(
-                "Grok Build vendor installer failed: "
-                + (completed.stderr or completed.stdout).strip()
-            )
-        staging_binary = bin_dir / GROK_COMMAND
-        stage_resolved = stage.resolve(strict=True)
-        resolved_binary = staging_binary.resolve(strict=True)
-        if stage_resolved not in resolved_binary.parents:
-            fail("Grok Build installer binary escaped the staging directory")
-        binary = read_software_file(resolved_binary, f"Grok Build staging binary {resolved_binary}")
-        probe_env = minimal_process_env(str(bin_dir), tmp_dir=tmp_dir)
-        probe_env["HOME"] = str(stage / "probe-home")
-        Path(probe_env["HOME"]).mkdir(mode=OWNER_DIRECTORY_MODE)
-        try:
-            probe = subprocess.run(
-                [str(resolved_binary), "--version"],
-                cwd=stage,
-                env=probe_env,
-                text=True,
-                input="",
-                capture_output=True,
-                check=False,
-                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
-            )
-        except FileNotFoundError as exc:
-            missing = exc.filename or str(resolved_binary)
-            fail(f"Grok Build version probe executable is missing: {missing}")
-        except subprocess.TimeoutExpired:
-            fail("Grok Build version probe timed out")
-        version_output = (probe.stdout + probe.stderr).strip()
-        if probe.returncode != 0 or GROK_VERSION not in version_output:
-            fail("Grok Build staging binary did not report the pinned version")
-        return {
-            "binary": binary,
-            "binary_sha256": sha256_bytes(binary),
-            "installer_source": installer_source,
-            "installer_sha256": installer_sha256,
-            "version_output": version_output,
-        }
 
 
 def install_grok_software(target: Path, command: str) -> dict[str, Any]:
@@ -6542,15 +6986,11 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
             )
             cleanup_pending_result = False
             try:
-                installer, installer_sha256, installer_source = read_pinned_installer()
-                artifact = run_vendor_installer(
-                    installer, installer_source, installer_sha256, target
-                )
+                artifact = materialize_verified_npm_artifact(target)
                 stamp_bytes = canonical_json(
                     software_stamp(
                         target,
-                        installer_source=artifact["installer_source"],
-                        installer_sha256=artifact["installer_sha256"],
+                        artifact=artifact,
                         binary_sha256=artifact["binary_sha256"],
                         version_output=artifact["version_output"],
                     )

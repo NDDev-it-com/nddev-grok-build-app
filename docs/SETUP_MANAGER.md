@@ -58,10 +58,13 @@ memory, subagents, LSP, write, web fetch, or tool search.
 
 `software-status`, `install-cli`, `update-cli`, and `remove-cli` manage the Grok
 Build runtime separately from setup/profile switching. Production installs use
-only the official installer and pin metadata recorded in
+verified official npm tarballs and pin metadata recorded in
 `cli-tools/nddev_grok_build.py`, `build/version.json`, and
-`references/grok-build-baseline.json`. Removal is limited to manager-owned
-runtime state and preserves setup content, auth, and unrelated target files.
+`references/grok-build-baseline.json`. The manager does not run npm install or
+package scripts; Node is resolved from fixed absolute candidates and is used
+only for deterministic Brotli decompression of the verified native archive.
+Removal is limited to manager-owned runtime state and preserves setup content,
+auth, and unrelated target files.
 NDDev runtime management is product-scoped to macOS and Ubuntu desktop/server.
 The Ubuntu gate is an NDDev product boundary over the vendor Linux artifact:
 upstream has not published an Ubuntu version or glibc floor. Canonical product
@@ -70,13 +73,13 @@ are source-owned by `config/nddev-contract.json`,
 `build/manifest.json`, `references/grok-build-baseline.json`, and the manager's
 platform detection functions.
 Unsupported hosts are rejected before target resolution, target inspection,
-target creation, locks, installer network/stage work, or launch child execution.
+target creation, locks, artifact network/stage work, or launch child execution.
 
-The vendor installer runs in an isolated staging area. The manager validates the
-staged runtime, then persists only target-owned software state defined by the
-manager and public contract. Vendor staging side effects that are not part of
+Verified artifacts are processed in an isolated staging area. The manager
+validates the staged runtime, then persists only target-owned software state
+defined by the manager and public contract. Staging files that are not part of
 the managed runtime are discarded.
-Ordinary installer fetch and protocol failures are reported as stable manager
+Ordinary artifact fetch and protocol failures are reported as stable manager
 JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and

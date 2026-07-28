@@ -15,9 +15,10 @@ the module sources; `update-cli` refreshes target-owned Grok Build software.
 
 `install-cli`, `update-cli`, and `remove-cli` manage target-owned Grok Build
 without touching setup, auth, or unrelated target state. Install and update use
-the official stable-channel vendor installer with an exact version argument and
-SHA-256 verification. The current version, npm integrity, installer URL, and
-hash are code-owned in `build/version.json`,
+verified official npm tarballs for the umbrella package and selected native
+package. Package scripts are not run; the official installer is retained only as
+source metadata. The current version, package integrity, installer observation,
+and materialization bounds are code-owned in `build/version.json`,
 `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.
 All target-bound setup, software, status, plan, restore, remove, and launch
 commands reject unsupported hosts before target resolution or runtime side

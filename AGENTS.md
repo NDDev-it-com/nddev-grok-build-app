@@ -15,7 +15,7 @@ documentation only.
 
 ## Public Facts
 
-- Runtime versions and installer provenance are owned by `build/version.json`,
+- Runtime versions and artifact provenance are owned by `build/version.json`,
   `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.
 - Managed file projection is owned by `cli-tools/nddev_grok_build.py` and checked
   by `cli-tools/validate_public_contracts.py`.

@@ -73,6 +73,11 @@ GROK_VERSION = "0.2.112"
 NPM_PACKAGE = "@xai-official/grok"
 NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
 NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
+NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
+NPM_TARBALL_MAX_BYTES = 1 * 1024 * 1024
+NPM_UNPACKED_SIZE = 17281
+NPM_FILE_COUNT = 4
+NATIVE_NPM_TARBALL_MAX_BYTES = 96 * 1024 * 1024
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
 METADATA_MAX_BYTES = 256 * 1024
@@ -83,16 +88,26 @@ SOFTWARE_LIFECYCLE_KEYS = {
     "credential_inheritance",
     "discarded_stage_paths",
     "entrypoint",
+    "archive_policy",
     "fetch_errors_are_domain_errors",
     "install_command",
+    "install_mechanism",
     "install_precondition",
     "installer_exact_version_arg",
+    "installer_observation_only",
     "installer_sha256",
-    "npm_integrity",
+    "native_npm_packages",
+    "native_npm_tarball_max_bytes",
+    "node_runtime",
     "npm_package",
+    "npm_file_count",
+    "npm_integrity",
     "npm_shasum",
     "npm_tarball",
+    "npm_tarball_max_bytes",
+    "npm_unpacked_size",
     "official_installer",
+    "package_scripts_disabled",
     "persisted_stage_paths",
     "presence_signal",
     "private_modes",
@@ -159,6 +174,72 @@ EXPECTED_PLATFORM_ARCHITECTURES = {
     "macos": ["arm64", "x64"],
     "ubuntu-glibc": ["arm64", "x64"],
 }
+EXPECTED_NATIVE_NPM_PACKAGES = {
+    "macos-arm64": {
+        "package": "@xai-official/grok-darwin-arm64",
+        "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+        "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+        "unpacked_size": 37113280,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": True,
+    },
+    "macos-x64": {
+        "package": "@xai-official/grok-darwin-x64",
+        "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+        "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+        "unpacked_size": 43142250,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": True,
+    },
+    "ubuntu-glibc-arm64": {
+        "package": "@xai-official/grok-linux-arm64",
+        "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+        "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+        "unpacked_size": 40192893,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": True,
+    },
+    "ubuntu-glibc-x64": {
+        "package": "@xai-official/grok-linux-x64",
+        "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+        "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+        "unpacked_size": 45242318,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": True,
+    },
+}
+EXPECTED_UNSUPPORTED_NPM_PACKAGES = {
+    "@xai-official/grok-win32-x64": {
+        "version": "0.2.112",
+        "integrity": "sha512-xrBENcmX2ChPmTOMiYod5nbVjkYcuPZ3/sFJ7OLUDHyjMYUME3NJUuN2sO8kBbYwGRvdiMO2D6AK6OJeUcmJow==",
+        "shasum": "b2e9df8e5ca0bd6e48783aafd4c904b411632109",
+        "unpacked_size": 40804870,
+        "product_supported": False,
+    },
+    "@xai-official/grok-win32-arm64": {
+        "version": "0.2.112",
+        "integrity": "sha512-LSQfzL3+engKov1WA/X3QLh7vxvftVFfZEe1twfkYs2iuTxyJ8rgd4JymYA0hP1SEX9RFryllNZSsHRkQqgF9A==",
+        "shasum": "fc45a94d5b627f89eab8489bbe1105172375a2a2",
+        "unpacked_size": 36877084,
+        "product_supported": False,
+    },
+}
 MACHINE_ARCH_BY_HOST_ARCH = {"arm64": "aarch64", "x64": "x86_64"}
 EXPECTED_PLATFORM_DETECTION = {
     "canonical_host_ids": EXPECTED_RUNTIME_PLATFORMS,
@@ -176,7 +257,7 @@ EXPECTED_PLATFORM_DETECTION = {
     "standard_unsupported_categories": EXPECTED_UNSUPPORTED_PLATFORMS,
     "non_ubuntu_rejection": (
         "before target resolution, target inspection, target creation, product coordination, "
-        "target anchor, installer fetch, installer staging, or launch child execution"
+        "target anchor, artifact fetch, artifact staging, or launch child execution"
     ),
 }
 EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
@@ -192,7 +273,7 @@ EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
         "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64",
     },
     "npm_package": "@xai-official/grok",
-    "npm_platform_package_ids_observed_not_module_install": [
+    "npm_platform_package_ids_observed": [
         "@xai-official/grok-darwin-x64",
         "@xai-official/grok-darwin-arm64",
         "@xai-official/grok-linux-x64",
@@ -200,6 +281,7 @@ EXPECTED_VENDOR_PLATFORM_OBSERVATIONS = {
         "@xai-official/grok-win32-x64",
         "@xai-official/grok-win32-arm64",
     ],
+    "npm_native_package_mapping": EXPECTED_NATIVE_NPM_PACKAGES,
     "product_unsupported_vendor_observations": {
         "windows": {
             "product_supported": False,
@@ -479,6 +561,12 @@ def validate_manager_source() -> None:
         "def read_lifecycle_payload(",
         "ReadLifecycleRetry",
         "READ_LIFECYCLE_MAX_ATTEMPTS",
+        "def read_verified_npm_tarball(",
+        "def safe_tgz_members(",
+        "def resolve_node_runtime(",
+        "def decompress_brotli_with_node(",
+        "def materialize_verified_npm_artifact(",
+        "package_scripts_disabled",
         "def acquire_bootstrap_lock_handle_for_identity(",
         "class TreeEntry(",
         "class PreservedTree(",
@@ -510,10 +598,12 @@ def validate_manager_source() -> None:
             raise ValueError(f"cleanup journal publication must not use {marker}")
     if "target / root[" in source or "target / relative_root" in source:
         raise ValueError("cleanup drain must not derive deletion paths from JSON paths")
+    if "def run_vendor_installer(" in source or 'bash", str(installer_path)' in source:
+        raise ValueError("software install must not execute the vendor installer")
     read_start = source.index("def read_existing_file(")
     read_end = source.index("def fsync_directory(")
     read_source = source[read_start:read_end]
-    if ".open(\"rb\")" in read_source or ".open('rb')" in read_source:
+    if '.open("rb")' in read_source or ".open('rb')" in read_source:
         raise ValueError("managed metadata reads must not reopen by pathname")
     for marker in (
         "O_NOFOLLOW",
@@ -577,6 +667,26 @@ def fetch_official_source_text(url: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def fetch_npm_registry_json(url: str) -> dict[str, Any]:
+    if not url.startswith("https://registry.npmjs.org/@xai-official%2f"):
+        raise ValueError(f"network observation URL is not an xAI npm registry source: {url}")
+    request = urllib.request.Request(url, headers={"User-Agent": "nddev-grok-build-validator"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            status = getattr(response, "status", 200)
+            if status < 200 or status >= 300:
+                raise ValueError(f"npm registry returned HTTP {status}: {url}")
+            data = response.read(1024 * 1024 + 1)
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise ValueError(f"npm registry fetch failed: {url}: {exc}") from exc
+    if len(data) > 1024 * 1024:
+        raise ValueError(f"npm registry response is too large: {url}")
+    value = json.loads(data.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"npm registry response must be an object: {url}")
+    return value
+
+
 def validate_network_observations(contract: dict[str, Any], baseline: dict[str, Any]) -> None:
     docs_url = baseline.get("product", {}).get("official_docs_url")
     if docs_url != "https://docs.x.ai/build/overview":
@@ -590,16 +700,49 @@ def validate_network_observations(contract: dict[str, Any], baseline: dict[str, 
     if "https://docs.x.ai/build/getting-started" in source_urls:
         raise ValueError("baseline still references dead Grok Build getting-started docs")
     required_sources = {
-        "https://x.ai/cli": ("Grok Build", "install.sh"),
+        "https://x.ai/cli/install.sh": ("Grok CLI installer", "TARGET", "BASE_URL"),
         "https://docs.x.ai/build/overview": ("Grok Build", "coding agent"),
     }
     for url, markers in required_sources.items():
-        if url not in source_urls and url != "https://x.ai/cli":
+        if url not in source_urls:
             raise ValueError(f"baseline official_sources missing {url}")
         text = fetch_official_source_text(url)
         for marker in markers:
             if marker not in text:
                 raise ValueError(f"official source is stale or unexpected: {url}: {marker}")
+    package_urls = {
+        NPM_PACKAGE: {
+            "url": "https://registry.npmjs.org/@xai-official%2fgrok/0.2.112",
+            "integrity": NPM_INTEGRITY,
+            "shasum": NPM_SHASUM,
+            "tarball": NPM_TARBALL,
+            "unpackedSize": NPM_UNPACKED_SIZE,
+            "fileCount": NPM_FILE_COUNT,
+        }
+    }
+    for host_pin in EXPECTED_NATIVE_NPM_PACKAGES.values():
+        package_urls[host_pin["package"]] = {
+            "url": (
+                "https://registry.npmjs.org/"
+                + str(host_pin["package"]).replace("/", "%2f")
+                + "/0.2.112"
+            ),
+            "integrity": host_pin["integrity"],
+            "shasum": host_pin["shasum"],
+            "tarball": host_pin["tarball"],
+            "unpackedSize": host_pin["unpacked_size"],
+            "fileCount": host_pin["file_count"],
+        }
+    for package_name, expected in package_urls.items():
+        metadata = fetch_npm_registry_json(str(expected["url"]))
+        dist = metadata.get("dist")
+        if metadata.get("name") != package_name or metadata.get("version") != GROK_VERSION:
+            raise ValueError(f"npm registry identity mismatch: {package_name}")
+        if not isinstance(dist, dict):
+            raise ValueError(f"npm registry dist metadata missing: {package_name}")
+        for key in ("integrity", "shasum", "tarball", "unpackedSize", "fileCount"):
+            if dist.get(key) != expected[key]:
+                raise ValueError(f"npm registry dist metadata mismatch: {package_name}: {key}")
 
 
 def run_archive_command(archive: Path, command: list[str], env: dict[str, str]) -> None:
@@ -715,10 +858,26 @@ def install_stub_software(manager: Any, target: Path, body: bytes) -> str:
     for binary in (manager.managed_grok_path(target), manager.software_tree_binary(target)):
         binary.write_bytes(body)
         binary.chmod(manager.OWNER_EXEC_MODE)
+    native_pin = manager.selected_native_npm_pin(manager.require_supported_runtime_platform())
+    artifact = {
+        "installer_source": manager.INSTALLER_URL,
+        "installer_sha256": manager.INSTALLER_SHA256,
+        "npm_tarball_sha256": "0" * 64,
+        "npm_tarball_size_bytes": 1,
+        "npm_unpacked_size": manager.GROK_NPM_UNPACKED_SIZE,
+        "native_npm_package": native_pin["package"],
+        "native_npm_integrity": native_pin["integrity"],
+        "native_npm_shasum": native_pin["shasum"],
+        "native_npm_tarball": native_pin["tarball"],
+        "native_npm_tarball_sha256": "1" * 64,
+        "native_npm_tarball_size_bytes": 1,
+        "native_npm_unpacked_size": native_pin["unpacked_size"],
+        "node_path": "/usr/bin/node",
+        "node_version": "v20.0.0",
+    }
     stamp = manager.software_stamp(
         target,
-        installer_source=manager.INSTALLER_URL,
-        installer_sha256=manager.INSTALLER_SHA256,
+        artifact=artifact,
         binary_sha256=digest,
         version_output=f"grok {manager.GROK_VERSION}",
     )
@@ -1337,6 +1496,7 @@ def validate_anchor_recovery_smokes(manager: Any, target: Path) -> None:
 
 def validate_fetch_error_smokes(manager: Any) -> None:
     original_urlopen = manager.urllib.request.urlopen
+    original_resolve_node = manager.resolve_node_runtime
 
     class BadResponse:
         headers = {"Content-Length": "not-an-int"}
@@ -1351,6 +1511,7 @@ def validate_fetch_error_smokes(manager: Any) -> None:
             return b""
 
     try:
+        manager.resolve_node_runtime = lambda: (Path("/usr/bin/node"), "v20.0.0")
         with tempfile.TemporaryDirectory(prefix="nddev-grok-build-fetch-") as tmp_raw:
             target = Path(tmp_raw) / "grok-home"
 
@@ -1380,15 +1541,25 @@ def validate_fetch_error_smokes(manager: Any) -> None:
 
             manager.urllib.request.urlopen = interrupted
             try:
-                manager.read_pinned_installer()
+                manager.read_verified_npm_tarball(
+                    {
+                        "package": manager.GROK_NPM_PACKAGE,
+                        "integrity": manager.GROK_NPM_INTEGRITY,
+                        "shasum": manager.GROK_NPM_SHASUM,
+                        "tarball": manager.GROK_NPM_TARBALL,
+                    },
+                    label="umbrella Grok Build npm tarball",
+                    max_bytes=manager.GROK_NPM_TARBALL_MAX_BYTES,
+                )
             except KeyboardInterrupt:
                 pass
             except BaseException as exc:
-                raise ValueError("installer fetch must preserve KeyboardInterrupt") from exc
+                raise ValueError("npm artifact fetch must preserve KeyboardInterrupt") from exc
             else:
-                raise ValueError("installer fetch did not raise KeyboardInterrupt")
+                raise ValueError("npm artifact fetch did not raise KeyboardInterrupt")
     finally:
         manager.urllib.request.urlopen = original_urlopen
+        manager.resolve_node_runtime = original_resolve_node
 
 
 def validate_platform_scope(
@@ -1456,12 +1627,12 @@ def validate_platform_scope(
     ):
         raise ValueError("baseline installer asset mapping mismatch")
     if (
-        support.get("npm_platform_package_ids_observed_not_module_install")
-        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS[
-            "npm_platform_package_ids_observed_not_module_install"
-        ]
+        support.get("npm_platform_package_ids_observed")
+        != EXPECTED_VENDOR_PLATFORM_OBSERVATIONS["npm_platform_package_ids_observed"]
     ):
         raise ValueError("baseline npm platform package observation mismatch")
+    if support.get("npm_native_package_mapping") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("baseline npm native package mapping mismatch")
     unsupported_vendor = support.get("product_unsupported_vendor_observations")
     if (
         unsupported_vendor
@@ -1490,6 +1661,8 @@ def validate_platform_scope(
     ):
         if upstream.get(key) != release.get(release_key):
             raise ValueError(f"baseline upstream Linux metadata mismatch: {key}")
+    if upstream.get("native_npm_package_mapping") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("baseline upstream Linux native package mapping mismatch")
 
     for platform_id, system, os_release, libc_info, prefix in (
         ("macos", "Darwin", {}, None, "macos"),
@@ -1560,8 +1733,7 @@ def validate_platform_scope(
         raise ValueError("Windows arm64 vendor observation mismatch")
 
     original_info = manager.runtime_platform_info
-    original_read = manager.read_pinned_installer
-    original_stage = manager.run_vendor_installer
+    original_materialize = manager.materialize_verified_npm_artifact
     original_popen = manager.subprocess.Popen
     original_product_lock = manager.acquire_product_lock
     original_bootstrap = manager.acquire_bootstrap_lock
@@ -1570,8 +1742,7 @@ def validate_platform_scope(
     touched = {
         "target": False,
         "bootstrap": False,
-        "fetch": False,
-        "stage": False,
+        "materialize": False,
         "launch": False,
     }
 
@@ -1583,13 +1754,9 @@ def validate_platform_scope(
             libc_info=("glibc", ""),
         )
 
-    def fail_fetch() -> Any:
-        touched["fetch"] = True
-        raise ValueError("network fetch should not be reached")
-
-    def fail_stage(*_args: Any, **_kwargs: Any) -> Any:
-        touched["stage"] = True
-        raise ValueError("installer staging should not be reached")
+    def fail_materialize(*_args: Any, **_kwargs: Any) -> Any:
+        touched["materialize"] = True
+        raise ValueError("artifact materialization should not be reached")
 
     class FailLaunch:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1606,8 +1773,7 @@ def validate_platform_scope(
 
     try:
         manager.runtime_platform_info = non_ubuntu_info
-        manager.read_pinned_installer = fail_fetch
-        manager.run_vendor_installer = fail_stage
+        manager.materialize_verified_npm_artifact = fail_materialize
         manager.subprocess.Popen = FailLaunch
         manager.acquire_product_lock = fail_bootstrap
         manager.acquire_bootstrap_lock = fail_bootstrap
@@ -1640,8 +1806,7 @@ def validate_platform_scope(
             raise ValueError(f"non-Ubuntu preflight reached runtime side effects: {touched}")
     finally:
         manager.runtime_platform_info = original_info
-        manager.read_pinned_installer = original_read
-        manager.run_vendor_installer = original_stage
+        manager.materialize_verified_npm_artifact = original_materialize
         manager.subprocess.Popen = original_popen
         manager.acquire_product_lock = original_product_lock
         manager.acquire_bootstrap_lock = original_bootstrap
@@ -1667,8 +1832,7 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
     original_lifecycle_snapshot = manager.snapshot_lifecycle_state
     original_software_snapshot = manager.snapshot_software_state
     original_read_stamp = manager.read_stamp
-    original_read_installer = manager.read_pinned_installer
-    original_stage = manager.run_vendor_installer
+    original_materialize = manager.materialize_verified_npm_artifact
     original_popen = manager.subprocess.Popen
 
     def external_depth() -> int:
@@ -1752,13 +1916,9 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
         require_external("read_stamp")
         return original_read_stamp(*args, **kwargs)
 
-    def traced_read_installer() -> Any:
-        require_external("read_pinned_installer")
-        raise manager.GrokBuildSetupError("injected installer read stop")
-
-    def traced_stage(*_args: Any, **_kwargs: Any) -> Any:
-        require_external("run_vendor_installer")
-        raise manager.GrokBuildSetupError("installer stage should not be reached")
+    def traced_materialize(*_args: Any, **_kwargs: Any) -> Any:
+        require_external("materialize_verified_npm_artifact")
+        raise manager.GrokBuildSetupError("injected npm materialization stop")
 
     class FailLaunch:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1806,8 +1966,7 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
         manager.snapshot_lifecycle_state = traced_lifecycle_snapshot
         manager.snapshot_software_state = traced_software_snapshot
         manager.read_stamp = traced_read_stamp
-        manager.read_pinned_installer = traced_read_installer
-        manager.run_vendor_installer = traced_stage
+        manager.materialize_verified_npm_artifact = traced_materialize
         manager.subprocess.Popen = FailLaunch
         with tempfile.TemporaryDirectory(prefix="nddev-grok-build-order-") as raw:
             tmp = Path(raw)
@@ -1839,7 +1998,7 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
             expect_manager_error(
                 manager,
                 lambda: manager.install_grok_software(failure_target, "install-cli"),
-                "injected installer read stop",
+                "injected npm materialization stop",
             )
             if failure_target.exists() or failure_target.is_symlink():
                 raise ValueError("failed install-cli ordering smoke left target state")
@@ -1860,8 +2019,7 @@ def validate_lifecycle_ordering_smoke(manager: Any) -> None:
         manager.snapshot_lifecycle_state = original_lifecycle_snapshot
         manager.snapshot_software_state = original_software_snapshot
         manager.read_stamp = original_read_stamp
-        manager.read_pinned_installer = original_read_installer
-        manager.run_vendor_installer = original_stage
+        manager.materialize_verified_npm_artifact = original_materialize
         manager.subprocess.Popen = original_popen
     if not order or not any(item.startswith("product-held:") for item in order):
         raise ValueError("lifecycle ordering smoke did not exercise external lock")
@@ -2495,6 +2653,20 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("npm integrity mismatch")
     if build.get("grok_build_npm_shasum") != NPM_SHASUM:
         raise ValueError("npm shasum mismatch")
+    if build.get("grok_build_install_mechanism") != "verified-npm-tarball":
+        raise ValueError("build version must declare verified npm tarball install")
+    if build.get("grok_build_npm_tarball_max_bytes") != NPM_TARBALL_MAX_BYTES:
+        raise ValueError("build version npm tarball byte bound mismatch")
+    if build.get("grok_build_npm_unpacked_size") != NPM_UNPACKED_SIZE:
+        raise ValueError("build version npm unpacked size mismatch")
+    if build.get("grok_build_npm_file_count") != NPM_FILE_COUNT:
+        raise ValueError("build version npm file count mismatch")
+    if build.get("grok_build_native_packages") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("build version native npm package mapping mismatch")
+    if build.get("grok_build_node_requires") != ">=20":
+        raise ValueError("build version Node requirement mismatch")
+    if build.get("grok_build_package_scripts_disabled") is not True:
+        raise ValueError("build version must declare package scripts disabled")
     if baseline["runtime"]["command"] != "grok":
         raise ValueError("baseline command must be grok")
     if baseline.get("product", {}).get("official_docs_url") != "https://docs.x.ai/build/overview":
@@ -2507,10 +2679,30 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("baseline must pin the official vendor installer")
     if baseline["release"].get("official_installer_sha256") != INSTALLER_SHA256:
         raise ValueError("baseline installer SHA-256 mismatch")
-    if baseline["release"].get("module_install_mechanism") != "vendor-installer-only":
-        raise ValueError("baseline must declare vendor-installer-only install")
+    if baseline["release"].get("module_install_mechanism") != "verified-npm-tarball":
+        raise ValueError("baseline must declare verified npm tarball install")
     if baseline["release"].get("module_npm_install_supported") is not False:
-        raise ValueError("module must not support npm installation")
+        raise ValueError("module must not support npm CLI installation")
+    if baseline["release"].get("module_npm_archive_materialization") is not True:
+        raise ValueError("baseline must declare npm archive materialization")
+    if baseline["release"].get("module_package_scripts_disabled") is not True:
+        raise ValueError("baseline must declare package scripts disabled")
+    if baseline["release"].get("module_installer_observation_only") is not True:
+        raise ValueError("baseline must treat installer metadata as observation only")
+    if baseline["release"].get("native_npm_package_mapping") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("baseline native npm package mapping mismatch")
+    native_packages = baseline["release"].get("native_npm_packages")
+    if not isinstance(native_packages, dict):
+        raise ValueError("baseline native npm packages missing")
+    for package_name, expected in {
+        **{
+            item["package"]: {"version": GROK_VERSION, **item}
+            for item in EXPECTED_NATIVE_NPM_PACKAGES.values()
+        },
+        **EXPECTED_UNSUPPORTED_NPM_PACKAGES,
+    }.items():
+        if native_packages.get(package_name) != expected:
+            raise ValueError(f"baseline native npm package metadata mismatch: {package_name}")
     if contract["plugin_marketplace"]["binary_delivery"] is not False:
         raise ValueError("builder plugin must not deliver binaries")
     runtime = contract.get("runtime_launch", {})
@@ -2532,12 +2724,43 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("software_lifecycle installer SHA-256 mismatch")
     if lifecycle.get("installer_exact_version_arg") != GROK_VERSION:
         raise ValueError("software_lifecycle exact version argument mismatch")
+    if lifecycle.get("installer_observation_only") is not True:
+        raise ValueError("software_lifecycle must treat installer as observation only")
+    if lifecycle.get("install_mechanism") != "verified-npm-tarball":
+        raise ValueError("software_lifecycle install mechanism mismatch")
     if lifecycle.get("channel") != "stable":
         raise ValueError("software_lifecycle channel mismatch")
     if lifecycle.get("npm_package") != NPM_PACKAGE:
         raise ValueError("software_lifecycle npm package mismatch")
     if lifecycle.get("npm_integrity") != NPM_INTEGRITY:
         raise ValueError("software_lifecycle npm integrity mismatch")
+    if lifecycle.get("npm_shasum") != NPM_SHASUM:
+        raise ValueError("software_lifecycle npm shasum mismatch")
+    if lifecycle.get("npm_tarball") != NPM_TARBALL:
+        raise ValueError("software_lifecycle npm tarball mismatch")
+    if lifecycle.get("npm_tarball_max_bytes") != NPM_TARBALL_MAX_BYTES:
+        raise ValueError("software_lifecycle npm tarball bound mismatch")
+    if lifecycle.get("npm_unpacked_size") != NPM_UNPACKED_SIZE:
+        raise ValueError("software_lifecycle npm unpacked size mismatch")
+    if lifecycle.get("npm_file_count") != NPM_FILE_COUNT:
+        raise ValueError("software_lifecycle npm file count mismatch")
+    if lifecycle.get("native_npm_packages") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("software_lifecycle native package mapping mismatch")
+    if lifecycle.get("native_npm_tarball_max_bytes") != NATIVE_NPM_TARBALL_MAX_BYTES:
+        raise ValueError("software_lifecycle native tarball bound mismatch")
+    node_runtime = lifecycle.get("node_runtime")
+    if (
+        not isinstance(node_runtime, dict)
+        or node_runtime.get("minimum_major") != 20
+        or "PATH" not in str(node_runtime.get("resolution", ""))
+        or "Brotli" not in str(node_runtime.get("usage", ""))
+    ):
+        raise ValueError("software_lifecycle Node runtime policy mismatch")
+    archive_policy = lifecycle.get("archive_policy")
+    if not isinstance(archive_policy, dict) or archive_policy.get("scripts_disabled") is not True:
+        raise ValueError("software_lifecycle archive policy must disable scripts")
+    if lifecycle.get("package_scripts_disabled") is not True:
+        raise ValueError("software_lifecycle must disable package scripts")
     if lifecycle.get("version") != GROK_VERSION:
         raise ValueError("software_lifecycle version mismatch")
     if lifecycle.get("entrypoint") != "bin/grok" or lifecycle.get("command") != "grok":
@@ -2553,15 +2776,21 @@ def main(argv: list[str] | None = None) -> int:
     if "present=true" not in str(lifecycle.get("presence_signal", "")):
         raise ValueError("software_lifecycle must document present=true")
     stage_env = lifecycle.get("stage_env")
-    if not isinstance(stage_env, dict) or stage_env.get("TMPDIR") != "<stage>/tmp":
-        raise ValueError("software_lifecycle must bind installer TMPDIR to <stage>/tmp")
-    if stage_env.get("GROK_CHANNEL") != "stable":
-        raise ValueError("software_lifecycle must bind installer channel to stable")
+    if not isinstance(stage_env, dict) or stage_env.get("TMPDIR") != "<stage>":
+        raise ValueError("software_lifecycle must bind artifact TMPDIR to the staging directory")
+    if stage_env.get("GROK_HOME") != "<stage>/probe-home":
+        raise ValueError("software_lifecycle must bind probe GROK_HOME to staging")
     manifest_lifecycle = manifest.get("software_lifecycle")
     if not isinstance(manifest_lifecycle, dict):
         raise ValueError("manifest software_lifecycle missing")
     if manifest_lifecycle.get("installer_sha256") != INSTALLER_SHA256:
         raise ValueError("manifest installer SHA-256 mismatch")
+    if manifest_lifecycle.get("installer_observation_only") is not True:
+        raise ValueError("manifest must treat installer metadata as observation only")
+    if manifest_lifecycle.get("install_mechanism") != "verified-npm-tarball":
+        raise ValueError("manifest software lifecycle install mechanism mismatch")
+    if manifest_lifecycle.get("native_npm_packages") != EXPECTED_NATIVE_NPM_PACKAGES:
+        raise ValueError("manifest native npm package mapping mismatch")
     if manifest_lifecycle.get("version") != GROK_VERSION:
         raise ValueError("manifest software version mismatch")
     if "remove-cli" not in str(manifest_lifecycle.get("remove_command", "")):

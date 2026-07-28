@@ -1389,15 +1389,26 @@ def preserve_file_for_rollback(
     )
     if backup_path.exists() or backup_path.is_symlink():
         fail(f"{label} rollback object already exists")
-    try:
-        os.replace(path, backup_path)
-    except OSError as exc:
-        fail(f"{label} rollback object preservation failed: {exc}")
-    fsync_directory(path.parent, f"{label} rollback object removal")
-    fsync_directory(backup_path.parent, f"{label} rollback object preservation")
-    return PreservedFile(
+    entry = PreservedFile(
         target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
     )
+    moved = False
+    try:
+        os.replace(path, backup_path)
+        moved = True
+        fsync_directory(path.parent, f"{label} rollback object removal")
+        fsync_directory(backup_path.parent, f"{label} rollback object preservation")
+        return entry
+    except OSError as exc:
+        if moved:
+            restore_preserved_files_retry({label: entry})
+            cleanup_preserved_stage_roots_retry({label: entry})
+        fail(f"{label} rollback object preservation failed: {exc}")
+    except BaseException:
+        if moved:
+            restore_preserved_files_retry({label: entry})
+            cleanup_preserved_stage_roots_retry({label: entry})
+        raise
 
 
 def restore_parent_mtime(entry: PreservedFile) -> None:

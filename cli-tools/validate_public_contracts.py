@@ -576,12 +576,16 @@ def run_archive_command(archive: Path, command: list[str], env: dict[str, str]) 
 def cleanup_bootstrap_lock_for_target(manager: Any, target: Path) -> None:
     parent = target.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    identity = manager.bootstrap_target_identity(target)
     system_root = Path("/tmp").resolve(strict=True)
     product_root = manager.bootstrap_product_root_path(system_root)
-    lock_path = product_root / manager.bootstrap_lock_digest(identity)
-    with contextlib.suppress(FileNotFoundError):
-        lock_path.unlink()
+    identities = {
+        manager.bootstrap_target_identity(target),
+        str(target.resolve(strict=False)),
+    }
+    for identity in identities:
+        lock_path = product_root / manager.bootstrap_lock_digest(identity)
+        with contextlib.suppress(FileNotFoundError):
+            lock_path.unlink()
     with contextlib.suppress(OSError):
         product_root.rmdir()
 
@@ -607,6 +611,7 @@ def validate_clean_archive_cache_smoke() -> None:
             (scratch / directory).mkdir(mode=0o700)
         manager = load_manager_module()
         status_target = scratch / "targets" / "grok-home"
+        bootstrap_before = bootstrap_artifact_snapshot(manager)
         commands = [
             [
                 sys.executable,
@@ -641,6 +646,8 @@ def validate_clean_archive_cache_smoke() -> None:
                 validate_no_python_caches(archive)
         finally:
             cleanup_bootstrap_lock_for_target(manager, status_target)
+            if bootstrap_artifact_snapshot(manager) != bootstrap_before:
+                raise ValueError("archive cache smoke left bootstrap lock residue")
 
 
 def expect_manager_error(manager: Any, callback: Any, expected: str) -> None:

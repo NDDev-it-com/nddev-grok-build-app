@@ -2,7 +2,8 @@
 
 `nddev-grok-build-app` owns only target-explicit Grok Build configuration and
 target-owned Grok Build software. The target must be an absolute directory and
-is treated as `GROK_HOME` only for manager operations and launch.
+is treated as `GROK_HOME` only for manager operations and launch. Project
+workspace selection is separate and source-owned by the manager launch command.
 
 ## Managed State
 
@@ -68,10 +69,13 @@ JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch keeps the lifecycle
 serialization guarantee through the child process and runs a verified
-target-owned Grok Build entrypoint. Exact child handoff, executable validation,
-and cleanup details are source-owned by `cli-tools/nddev_grok_build.py` and the
-runtime transaction policy in `build/manifest.json`. Lifecycle, auth, plugin,
-marketplace, and MCP mutating subcommands are denied through managed launch.
+target-owned Grok Build entrypoint. The child working directory is explicit:
+`--workspace` selects an absolute existing project directory, and omitting it
+captures the caller cwd. Exact child handoff, executable validation, native
+`--cwd` binding, and cleanup details are source-owned by
+`cli-tools/nddev_grok_build.py` and the runtime transaction policy in
+`build/manifest.json`. Lifecycle, auth, plugin, marketplace, and MCP mutating
+subcommands are denied through managed launch.
 Cooperative same-user manager operations are serialized; direct malicious
 same-user mutation of the target or bootstrap root, especially under `full-auto`
 sandbox `off`, is outside the cross-user isolation boundary.
@@ -88,9 +92,8 @@ requires an explicit `--profile` during migration.
 Run public, non-live checks from the module root:
 
 ```bash
-python3 -m py_compile cli-tools/nddev_grok_build.py cli-tools/validate_public_contracts.py
-python3 cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_grok_build.py list --json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/validate_public_contracts.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/nddev_grok_build.py list --json
 ```
 
 Use isolated temporary targets for lifecycle checks. Do not run `install-cli` or

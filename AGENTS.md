@@ -26,6 +26,6 @@ documentation only.
 Run from this module root:
 
 ```bash
-python3 -m py_compile cli-tools/nddev_grok_build.py cli-tools/validate_public_contracts.py
-python3 cli-tools/validate_public_contracts.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/validate_public_contracts.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/nddev_grok_build.py list --json
 ```

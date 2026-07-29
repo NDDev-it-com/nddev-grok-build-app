@@ -16,21 +16,32 @@
     "profile_identity_source": "<profile>/profile.json:id",
     "default_setup": "nddev-builder",
     "default_profile": "full-auto",
-    "setup_ids": ["nddev-builder"],
-    "profile_ids": ["full-auto", "safe"],
-    "legacy_setup_ids": ["safe", "balanced", "full-auto"],
+    "setup_ids": [
+      "nddev-builder"
+    ],
+    "profile_ids": [
+      "full-auto",
+      "safe"
+    ],
+    "legacy_setup_ids": [
+      "safe",
+      "balanced",
+      "full-auto"
+    ],
     "list_command": "python3 cli-tools/nddev_grok_build.py list [--json]",
     "status_command": "python3 cli-tools/nddev_grok_build.py status --target <absolute-dir> [--json]",
     "plan_command": "python3 cli-tools/nddev_grok_build.py plan --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
     "install_command": "python3 cli-tools/nddev_grok_build.py install --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
     "switch_command": "python3 cli-tools/nddev_grok_build.py switch --setup nddev-builder --profile <id> --target <absolute-dir> [--json]",
+    "update_command": "python3 cli-tools/nddev_grok_build.py update --target <absolute-dir> [--json]",
     "migrate_command": "python3 cli-tools/nddev_grok_build.py migrate --target <absolute-dir> [--profile <id>] [--json]",
     "restore_command": "python3 cli-tools/nddev_grok_build.py restore --backup <0..9> --target <absolute-dir> [--json]",
     "remove_command": "python3 cli-tools/nddev_grok_build.py remove --target <absolute-dir> [--json]",
     "software_status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-dir> [--json]",
     "software_install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-dir> [--json]",
     "software_update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-dir> [--json]",
-    "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> [--workspace <absolute-dir>] -- [args...]"
+    "software_remove_command": "python3 cli-tools/nddev_grok_build.py remove-cli --target <absolute-dir> [--json]",
+    "launch_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-dir> -- [args...]"
   },
   "managed_state": {
     "environment_variable": "GROK_HOME",
@@ -45,7 +56,12 @@
     "existing_target_mode_required": "0700",
     "preserve_other_state": true,
     "co_owned_config_strategy": "replace-managed-marker-block-only",
-    "legacy_allowed_commands": ["status", "migrate", "restore", "remove"],
+    "legacy_allowed_commands": [
+      "status",
+      "migrate",
+      "restore",
+      "remove"
+    ],
     "legacy_launch_denied": true
   },
   "setup_profile_model": {
@@ -60,7 +76,9 @@
         "[subagents].enabled": true,
         "[cli].auto_update": false,
         "[session].load_envrc": false,
-        "[plugins].enabled": ["nddev-builder"],
+        "[plugins].enabled": [
+          "nddev-builder"
+        ],
         "[[marketplace.sources]].name": "NDDev Builder"
       }
     },
@@ -91,20 +109,27 @@
     "external_bootstrap_lock_uses_fixed_system_temp_root": true,
     "external_bootstrap_lock_ignores_ambient_tmpdir": true,
     "external_bootstrap_lock_json_binding": true,
-    "external_lock_atomic_no_replace": true,
-    "external_lock_empty_partial_malformed_fail_closed": true,
-    "external_lock_stage_recovery_mutation_only": true,
-    "external_lock_stage_aliases_fail_closed_on_read_only": true,
-    "external_read_only_no_create": true,
+    "external_bootstrap_product_anchor": "global.lock",
+    "external_bootstrap_target_anchor_root": "target-locks",
+    "external_anchor_final_path_commit_point": true,
+    "external_anchor_no_replace_publication": true,
+    "external_anchor_hardlink_alias_recovery": true,
+    "external_anchor_final_unlinked_on_recovery": false,
+    "external_read_only_cold_no_anchor_creates_lock": false,
     "external_read_only_cold_namespace_empty_required": true,
+    "external_read_only_cold_namespace_entries_fail_closed": true,
     "external_read_only_cold_namespace_identity_retry": true,
+    "external_read_only_cold_no_anchor_post_observation_retry": true,
+    "external_read_only_seeded_uses_product_coordination": true,
     "external_lock_acquired_before_target_inspection": true,
-    "external_lock_released_after_internal_lock": true,
+    "external_product_handoff_to_target_anchor": true,
     "external_lock_not_exposed_to_child_env": true,
-    "persistent_flock_lock_file": true,
+    "persistent_external_flock_anchors": true,
     "control_root_stays_writable_while_locked": true,
-    "lock_parent_non_writable_while_held": true,
-    "lock_held_through_launch_child": true,
+    "target_local_lock_created": false,
+    "target_anchor_lock_held_through_launch_child": true,
+    "same_canonical_target_serialized": true,
+    "different_canonical_targets_concurrent_after_handoff": true,
     "concurrent_setup_mutations_denied_while_launching": true,
     "legacy_sibling_backups_read_only_when_strictly_validated": true,
     "bounded_managed_reads": true,
@@ -112,8 +137,26 @@
     "rollback_on_failure": true,
     "restore_validates_backup_envelope_before_mutation": true,
     "restore_validates_stamp_path_set_and_digests": true,
+    "backup_entry_payload_size_sha256_validated": true,
+    "backup_slot_replacement_transactional": true,
+    "failed_mutation_removes_new_backup": true,
     "restore_post_validates_clean_state": true,
     "restore_rollback_byte_identical_on_failure": true,
+    "same_setup_profile_noop": true,
+    "setup_update_uses_installed_identity": true,
+    "postconditions_compare_intended_bytes": true,
+    "atomic_write_order": "temporary write, temporary mode, file fsync, replace, parent fsync",
+    "post_replace_failure_rolls_back": true,
+    "object_preserving_rollback": true,
+    "software_no_target_stage_or_rollback_dirs": true,
+    "cleanup_journal_immutable_pending": true,
+    "cleanup_journal_top_level_pending": true,
+    "cleanup_journal_mutation_only_recovery": true,
+    "cleanup_journal_read_only_recovery": false,
+    "cleanup_journal_serialized_max_bytes": 33554432,
+    "cleanup_pending_status_plan_software_status_metadata": true,
+    "cleanup_pending_drain_is_lifecycle_work": true,
+    "supported_host_preflight_before_target_resolution": true,
     "installer_fetch_errors_are_domain_errors": true,
     "launch_requires_clean_managed_target": true,
     "launch_requires_current_target_owned_software": true,
@@ -121,77 +164,304 @@
     "launch_image_regular_immutable_mode": true,
     "runtime_home_tmp_xdg_stay_writable_while_locked": true,
     "launch_denies_lifecycle_auth_plugin_marketplace_mcp_mutations": true,
-    "launch_workspace_explicit_or_captured_cwd": true,
-    "launch_passes_native_cwd_argument": true,
     "launch_strips_provider_credentials": true,
     "no_ambient_provider_secrets": true,
-    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation of the target or bootstrap root, especially under sandbox off, is outside the cross-user isolation boundary"
+    "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation of the target or bootstrap root, especially under sandbox off, is outside the cross-user isolation boundary",
+    "verified_official_npm_artifacts_before_install": true,
+    "package_scripts_disabled_for_software_install": true,
+    "node_runtime_resolved_without_path_lookup": true
   },
   "runtime_launch": {
     "command": "grok",
-    "direct_command": "GROK_HOME=<absolute-target> (cwd=<workspace>) <absolute-target>/bin/grok --cwd <workspace> [args...]",
+    "direct_command": "GROK_HOME=<absolute-target> <absolute-target>/bin/grok [args...]",
     "environment_variable": "GROK_HOME",
-    "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
+    "manager_command": "python3 cli-tools/nddev_grok_build.py launch --target <absolute-target> -- [args...]",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
-    "target_role": "managed configuration/runtime home",
-    "workspace_policy": "explicit --workspace absolute existing directory, otherwise captured caller cwd",
-    "workspace_argument": "--workspace <absolute-existing-dir>",
-    "native_working_directory_argument": "--cwd <workspace>",
-    "child_cwd": "<workspace>",
-    "blocks_native_workspace_overrides": true,
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112",
     "managed_command": "bin/grok",
     "requires_current_target_owned_software": true,
     "path_fallback": false,
     "json_manager_errors_supported": true,
-    "supported_platforms": ["macos", "linux"],
-    "unsupported_platforms": []
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "supported_architectures": {
+      "macos": [
+        "arm64",
+        "x64"
+      ],
+      "ubuntu-glibc": [
+        "arm64",
+        "x64"
+      ]
+    },
+    "platform_detection": {
+      "canonical_host_ids": [
+        "macos-arm64",
+        "macos-x64",
+        "ubuntu-glibc-arm64",
+        "ubuntu-glibc-x64"
+      ],
+      "macos_system": "Darwin",
+      "ubuntu_system": "Linux",
+      "ubuntu_os_release_id": "ubuntu",
+      "ubuntu_libc": "glibc",
+      "ubuntu_version_floor": null,
+      "glibc_version_floor": null,
+      "ubuntu_scope": "NDDev product scope only; upstream publishes Linux assets but no Ubuntu version or glibc floor",
+      "linux_distro_sources": [
+        "/etc/os-release",
+        "/usr/lib/os-release"
+      ],
+      "standard_unsupported_categories": [
+        "windows",
+        "non-ubuntu-linux",
+        "linux-musl",
+        "unsupported-architecture"
+      ],
+      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, product coordination, target anchor, artifact fetch, artifact staging, or launch child execution"
+    },
+    "vendor_platform_observations": {
+      "official_installer_assets": {
+        "macos": [
+          "grok-0.2.112-macos-x86_64",
+          "grok-0.2.112-macos-aarch64"
+        ],
+        "linux": [
+          "grok-0.2.112-linux-x86_64",
+          "grok-0.2.112-linux-aarch64"
+        ],
+        "windows": [
+          "grok-0.2.112-windows-x86_64.exe",
+          "grok-0.2.112-windows-aarch64.exe"
+        ]
+      },
+      "installer_asset_mapping": {
+        "macos-arm64": "grok-0.2.112-macos-aarch64",
+        "macos-x64": "grok-0.2.112-macos-x86_64",
+        "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
+        "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64"
+      },
+      "npm_package": "@xai-official/grok",
+      "product_unsupported_vendor_observations": {
+        "windows": {
+          "product_supported": false,
+          "official_installer_assets": [
+            "grok-0.2.112-windows-x86_64.exe",
+            "grok-0.2.112-windows-aarch64.exe"
+          ],
+          "npm_optional_packages": [
+            "@xai-official/grok-win32-x64",
+            "@xai-official/grok-win32-arm64"
+          ]
+        }
+      },
+      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names",
+      "musl_baseline_variant": null,
+      "baseline_variant": null,
+      "upstream_ubuntu_version_floor": null,
+      "upstream_glibc_floor": null,
+      "npm_platform_package_ids_observed": [
+        "@xai-official/grok-darwin-x64",
+        "@xai-official/grok-darwin-arm64",
+        "@xai-official/grok-linux-x64",
+        "@xai-official/grok-linux-arm64",
+        "@xai-official/grok-win32-x64",
+        "@xai-official/grok-win32-arm64"
+      ],
+      "npm_native_package_mapping": {
+        "macos-arm64": {
+          "package": "@xai-official/grok-darwin-arm64",
+          "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+          "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+          "unpacked_size": 37113280,
+          "file_count": 4,
+          "os": "darwin",
+          "cpu": "arm64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "macos-x64": {
+          "package": "@xai-official/grok-darwin-x64",
+          "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+          "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+          "unpacked_size": 43142250,
+          "file_count": 4,
+          "os": "darwin",
+          "cpu": "x64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "ubuntu-glibc-arm64": {
+          "package": "@xai-official/grok-linux-arm64",
+          "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+          "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+          "unpacked_size": 40192893,
+          "file_count": 4,
+          "os": "linux",
+          "cpu": "arm64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "ubuntu-glibc-x64": {
+          "package": "@xai-official/grok-linux-x64",
+          "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+          "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+          "unpacked_size": 45242318,
+          "file_count": 4,
+          "os": "linux",
+          "cpu": "x64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        }
+      }
+    }
   },
   "software_lifecycle": {
     "stamp_file": "NDDEV-GROK-BUILD-SOFTWARE.json",
     "stamp_schema": 2,
-    "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target /absolute/target --json",
-    "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/target --json",
-    "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/target --json",
+    "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-target> [--json]",
+    "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-target> [--json]",
+    "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-target> [--json]",
+    "remove_command": "python3 cli-tools/nddev_grok_build.py remove-cli --target <absolute-target> [--json]",
     "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-GROK-BUILD-SOFTWARE.json, .nddev-software/grok-build, .nddev-software/grok-build/versions/0.2.112, or bin/grok",
-    "install_precondition": "install-cli refuses any existing target-owned software presence; use update-cli for partial or existing state",
-    "update_precondition": "update-cli repairs existing safe target-owned software presence and refuses absent software state",
+    "install_precondition": "absent target-owned software presence",
+    "update_precondition": "existing safe target-owned software presence, including missing or corrupt identity stamp repair",
+    "remove_precondition": "absent, partial, or complete safe target-owned software presence; preserves setup, auth, and unrelated target state",
     "official_installer": "https://x.ai/cli/install.sh",
     "installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
     "installer_exact_version_arg": "0.2.112",
+    "installer_observation_only": true,
     "channel": "stable",
+    "install_mechanism": "verified-npm-tarball",
     "npm_package": "@xai-official/grok",
     "npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
     "npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8",
     "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
+    "npm_tarball_max_bytes": 1048576,
+    "npm_unpacked_size": 17281,
+    "npm_file_count": 4,
+    "native_npm_packages": {
+      "macos-arm64": {
+        "package": "@xai-official/grok-darwin-arm64",
+        "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+        "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+        "unpacked_size": 37113280,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "macos-x64": {
+        "package": "@xai-official/grok-darwin-x64",
+        "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+        "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+        "unpacked_size": 43142250,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "ubuntu-glibc-arm64": {
+        "package": "@xai-official/grok-linux-arm64",
+        "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+        "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+        "unpacked_size": 40192893,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "ubuntu-glibc-x64": {
+        "package": "@xai-official/grok-linux-x64",
+        "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+        "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+        "unpacked_size": 45242318,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      }
+    },
+    "native_npm_tarball_max_bytes": 100663296,
+    "node_runtime": {
+      "minimum_major": 20,
+      "resolution": "fixed absolute candidate paths only; PATH and npm are not used for discovery",
+      "usage": "deterministic Brotli decompression only"
+    },
+    "archive_policy": {
+      "scripts_disabled": true,
+      "member_policy": "regular files only; no absolute paths, dot-dot, backslashes, links, devices, duplicate or unexpected members",
+      "umbrella_expected_members": [
+        "package/README.md",
+        "package/bin/grok",
+        "package/bin/postinstall.js",
+        "package/package.json"
+      ],
+      "native_expected_members": [
+        "package/README.md",
+        "package/THIRD_PARTY_NOTICES.md",
+        "package/bin/grok.br",
+        "package/package.json"
+      ]
+    },
+    "package_scripts_disabled": true,
     "version": "0.2.112",
     "command": "grok",
     "target_owned": true,
     "software_root": ".nddev-software/grok-build/versions/0.2.112",
     "entrypoint": "bin/grok",
     "status_executes_binary": false,
-    "version_probe": "staging binary only",
+    "version_probe": "decompressed staging binary only",
     "fetch_errors_are_domain_errors": true,
     "stage_env": {
-      "HOME": "<stage>/home",
-      "GROK_HOME": "<stage>/grok-home",
-      "GROK_BIN_DIR": "<stage>/bin",
-      "GROK_CHANNEL": "stable",
-      "TMPDIR": "<stage>/tmp",
-      "PATH": "<stage>/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+      "HOME": "<stage>/probe-home",
+      "GROK_HOME": "<stage>/probe-home",
+      "TMPDIR": "<stage>",
+      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
     },
-    "persisted_stage_paths": ["bin/grok", ".nddev-software/grok-build/versions/0.2.112/grok"],
-    "discarded_stage_paths": ["shell rc files", "completions", "installer config.toml", "agent alias"],
+    "persisted_stage_paths": [
+      "bin/grok",
+      ".nddev-software/grok-build/versions/0.2.112/grok"
+    ],
+    "discarded_stage_paths": [
+      "umbrella npm wrapper",
+      "postinstall.js metadata",
+      "compressed native payload",
+      "README and notice files",
+      "materialization temp files"
+    ],
     "private_modes": {
       "directories": "0700",
       "stamp": "0600",
       "binary": "0700"
     },
     "rollback_on_failure": true,
-    "credential_inheritance": "provider secrets are not inherited by installer subprocesses or launch"
+    "credential_inheritance": "provider secrets are not inherited by artifact fetch, Node decompression, probe subprocesses, or launch"
   },
   "plugin_marketplace": {
     "plugin_id": "nddev-builder",
@@ -217,7 +487,7 @@
     "baseline_ref": "references/grok-build-baseline.json",
     "version_ref": "build/version.json",
     "official_docs": {
-      "overview": "https://docs.x.ai/build/getting-started",
+      "overview": "https://docs.x.ai/build/overview",
       "cli": "https://docs.x.ai/build/cli/reference",
       "settings": "https://docs.x.ai/build/settings",
       "settings_reference": "https://docs.x.ai/build/settings/reference",

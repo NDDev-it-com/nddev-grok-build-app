@@ -7,9 +7,18 @@
   "profile_root": "profiles",
   "default_setup": "nddev-builder",
   "default_profile": "full-auto",
-  "setup_ids": ["nddev-builder"],
-  "profile_ids": ["full-auto", "safe"],
-  "legacy_setup_ids": ["safe", "balanced", "full-auto"],
+  "setup_ids": [
+    "nddev-builder"
+  ],
+  "profile_ids": [
+    "full-auto",
+    "safe"
+  ],
+  "legacy_setup_ids": [
+    "safe",
+    "balanced",
+    "full-auto"
+  ],
   "managed_files": [
     "config.toml",
     "AGENTS.md",
@@ -65,24 +74,28 @@
       "plan",
       "install",
       "switch",
-      "migrate",
-      "restore",
-      "remove",
-      "software-status",
-      "install-cli",
-      "update-cli"
-    ],
-    "target_required": [
-      "status",
-      "plan",
-      "install",
-      "switch",
+      "update",
       "migrate",
       "restore",
       "remove",
       "software-status",
       "install-cli",
       "update-cli",
+      "remove-cli"
+    ],
+    "target_required": [
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "update",
+      "migrate",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
+      "remove-cli",
       "launch"
     ],
     "plan_mutates": false,
@@ -95,12 +108,6 @@
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
-    "target_role": "managed configuration/runtime home",
-    "workspace_policy": "explicit --workspace absolute existing directory, otherwise captured caller cwd",
-    "workspace_argument": "--workspace <absolute-existing-dir>",
-    "native_working_directory_argument": "--cwd <workspace>",
-    "child_cwd": "<workspace>",
-    "blocks_native_workspace_overrides": true,
     "requires_clean_managed_target": true,
     "requires_current_target_owned_software": true,
     "denies_legacy_managed_state": true,
@@ -108,7 +115,153 @@
     "managed_command": "bin/grok",
     "target_environment_scope": "child-process-only",
     "required_version": "0.2.112",
-    "supported_platforms": ["macos", "linux"]
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "supported_architectures": {
+      "macos": [
+        "arm64",
+        "x64"
+      ],
+      "ubuntu-glibc": [
+        "arm64",
+        "x64"
+      ]
+    },
+    "platform_detection": {
+      "canonical_host_ids": [
+        "macos-arm64",
+        "macos-x64",
+        "ubuntu-glibc-arm64",
+        "ubuntu-glibc-x64"
+      ],
+      "macos_system": "Darwin",
+      "ubuntu_system": "Linux",
+      "ubuntu_os_release_id": "ubuntu",
+      "ubuntu_libc": "glibc",
+      "ubuntu_version_floor": null,
+      "glibc_version_floor": null,
+      "ubuntu_scope": "NDDev product scope only; upstream publishes Linux assets but no Ubuntu version or glibc floor",
+      "linux_distro_sources": [
+        "/etc/os-release",
+        "/usr/lib/os-release"
+      ],
+      "standard_unsupported_categories": [
+        "windows",
+        "non-ubuntu-linux",
+        "linux-musl",
+        "unsupported-architecture"
+      ],
+      "non_ubuntu_rejection": "before target resolution, target inspection, target creation, product coordination, target anchor, artifact fetch, artifact staging, or launch child execution"
+    },
+    "vendor_platform_observations": {
+      "official_installer_assets": {
+        "macos": [
+          "grok-0.2.112-macos-x86_64",
+          "grok-0.2.112-macos-aarch64"
+        ],
+        "linux": [
+          "grok-0.2.112-linux-x86_64",
+          "grok-0.2.112-linux-aarch64"
+        ],
+        "windows": [
+          "grok-0.2.112-windows-x86_64.exe",
+          "grok-0.2.112-windows-aarch64.exe"
+        ]
+      },
+      "installer_asset_mapping": {
+        "macos-arm64": "grok-0.2.112-macos-aarch64",
+        "macos-x64": "grok-0.2.112-macos-x86_64",
+        "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
+        "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64"
+      },
+      "npm_package": "@xai-official/grok",
+      "product_unsupported_vendor_observations": {
+        "windows": {
+          "product_supported": false,
+          "official_installer_assets": [
+            "grok-0.2.112-windows-x86_64.exe",
+            "grok-0.2.112-windows-aarch64.exe"
+          ],
+          "npm_optional_packages": [
+            "@xai-official/grok-win32-x64",
+            "@xai-official/grok-win32-arm64"
+          ]
+        }
+      },
+      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names",
+      "musl_baseline_variant": null,
+      "baseline_variant": null,
+      "upstream_ubuntu_version_floor": null,
+      "upstream_glibc_floor": null,
+      "npm_platform_package_ids_observed": [
+        "@xai-official/grok-darwin-x64",
+        "@xai-official/grok-darwin-arm64",
+        "@xai-official/grok-linux-x64",
+        "@xai-official/grok-linux-arm64",
+        "@xai-official/grok-win32-x64",
+        "@xai-official/grok-win32-arm64"
+      ],
+      "npm_native_package_mapping": {
+        "macos-arm64": {
+          "package": "@xai-official/grok-darwin-arm64",
+          "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+          "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+          "unpacked_size": 37113280,
+          "file_count": 4,
+          "os": "darwin",
+          "cpu": "arm64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "macos-x64": {
+          "package": "@xai-official/grok-darwin-x64",
+          "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+          "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+          "unpacked_size": 43142250,
+          "file_count": 4,
+          "os": "darwin",
+          "cpu": "x64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "ubuntu-glibc-arm64": {
+          "package": "@xai-official/grok-linux-arm64",
+          "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+          "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+          "unpacked_size": 40192893,
+          "file_count": 4,
+          "os": "linux",
+          "cpu": "arm64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        },
+        "ubuntu-glibc-x64": {
+          "package": "@xai-official/grok-linux-x64",
+          "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+          "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+          "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+          "unpacked_size": 45242318,
+          "file_count": 4,
+          "os": "linux",
+          "cpu": "x64",
+          "binary_member": "package/bin/grok.br",
+          "product_supported": true
+        }
+      }
+    }
   },
   "software_lifecycle": {
     "supported": true,
@@ -116,35 +269,122 @@
     "command": "grok",
     "version": "0.2.112",
     "channel": "stable",
+    "install_mechanism": "verified-npm-tarball",
     "npm_package": "@xai-official/grok",
     "npm_integrity": "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw==",
     "npm_shasum": "cd103bfeb3d102dff87788a9cbe8d36c293112c8",
     "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz",
+    "npm_tarball_max_bytes": 1048576,
+    "npm_unpacked_size": 17281,
+    "npm_file_count": 4,
+    "native_npm_packages": {
+      "macos-arm64": {
+        "package": "@xai-official/grok-darwin-arm64",
+        "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+        "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+        "unpacked_size": 37113280,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "macos-x64": {
+        "package": "@xai-official/grok-darwin-x64",
+        "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+        "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+        "unpacked_size": 43142250,
+        "file_count": 4,
+        "os": "darwin",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "ubuntu-glibc-arm64": {
+        "package": "@xai-official/grok-linux-arm64",
+        "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+        "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+        "unpacked_size": 40192893,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "arm64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      },
+      "ubuntu-glibc-x64": {
+        "package": "@xai-official/grok-linux-x64",
+        "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+        "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+        "unpacked_size": 45242318,
+        "file_count": 4,
+        "os": "linux",
+        "cpu": "x64",
+        "binary_member": "package/bin/grok.br",
+        "product_supported": true
+      }
+    },
+    "native_npm_tarball_max_bytes": 100663296,
+    "node_runtime": {
+      "minimum_major": 20,
+      "resolution": "fixed absolute candidate paths only; PATH and npm are not used for discovery",
+      "usage": "deterministic Brotli decompression only"
+    },
+    "archive_policy": {
+      "scripts_disabled": true,
+      "member_policy": "regular files only; no absolute paths, dot-dot, backslashes, links, devices, duplicate or unexpected members",
+      "umbrella_expected_members": [
+        "package/README.md",
+        "package/bin/grok",
+        "package/bin/postinstall.js",
+        "package/package.json"
+      ],
+      "native_expected_members": [
+        "package/README.md",
+        "package/THIRD_PARTY_NOTICES.md",
+        "package/bin/grok.br",
+        "package/package.json"
+      ]
+    },
+    "package_scripts_disabled": true,
     "installer_url": "https://x.ai/cli/install.sh",
     "installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
     "installer_exact_version_arg": "0.2.112",
+    "installer_observation_only": true,
     "status_command": "python3 cli-tools/nddev_grok_build.py software-status --target <absolute-target> [--json]",
     "install_command": "python3 cli-tools/nddev_grok_build.py install-cli --target <absolute-target> [--json]",
     "update_command": "python3 cli-tools/nddev_grok_build.py update-cli --target <absolute-target> [--json]",
+    "remove_command": "python3 cli-tools/nddev_grok_build.py remove-cli --target <absolute-target> [--json]",
     "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-GROK-BUILD-SOFTWARE.json, .nddev-software/grok-build, .nddev-software/grok-build/versions/0.2.112, or bin/grok",
     "install_precondition": "absent target-owned software presence",
     "update_precondition": "existing safe target-owned software presence, including missing or corrupt identity stamp repair",
+    "remove_precondition": "absent, partial, or complete safe target-owned software presence; preserves setup, auth, and unrelated target state",
     "target_owned": true,
     "software_root": ".nddev-software/grok-build/versions/0.2.112",
     "entrypoint": "bin/grok",
     "stage_env": {
-      "HOME": "<stage>/home",
-      "GROK_HOME": "<stage>/grok-home",
-      "GROK_BIN_DIR": "<stage>/bin",
-      "GROK_CHANNEL": "stable",
-      "TMPDIR": "<stage>/tmp",
-      "PATH": "<stage>/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+      "HOME": "<stage>/probe-home",
+      "GROK_HOME": "<stage>/probe-home",
+      "TMPDIR": "<stage>",
+      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
     },
     "status_executes_binary": false,
-    "version_probe": "staging binary only",
+    "version_probe": "decompressed staging binary only",
     "fetch_errors_are_domain_errors": true,
-    "persisted_stage_paths": ["bin/grok", ".nddev-software/grok-build/versions/0.2.112/grok"],
-    "discarded_stage_paths": ["shell rc files", "completions", "installer config.toml", "agent alias"],
+    "persisted_stage_paths": [
+      "bin/grok",
+      ".nddev-software/grok-build/versions/0.2.112/grok"
+    ],
+    "discarded_stage_paths": [
+      "umbrella npm wrapper",
+      "postinstall.js metadata",
+      "compressed native payload",
+      "README and notice files",
+      "materialization temp files"
+    ],
     "private_modes": {
       "directories": "0700",
       "stamp": "0600",
@@ -200,7 +440,10 @@
     "canonical_target_bound": true,
     "strict_envelope_validation": true,
     "base64_validate": true,
-    "restored_stamp_path_set_validated": true
+    "entry_payload_size_sha256_validated": true,
+    "restored_stamp_path_set_validated": true,
+    "transactional_slot_replacement": true,
+    "failed_mutation_removes_new_backup": true
   },
   "transaction_policy": {
     "absolute_target_required": true,
@@ -214,38 +457,61 @@
     "reject_symlink_managed_files": true,
     "reject_hardlinked_managed_files": true,
     "rollback_on_failure": true,
-    "external_product_lock": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/global.lock",
-    "external_target_lock_root": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/target-locks",
-    "external_bootstrap_lock": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/target-locks/<sha256(namespace+canonical-target)>.lock",
-    "external_bootstrap_lock_system_root": "resolved /tmp; /private/tmp on macOS, /tmp on Linux",
+    "object_preserving_rollback": true,
+    "atomic_write_order": "temporary write, temporary mode, file fsync, replace, parent fsync",
+    "post_replace_failure_rolls_back": true,
+    "same_setup_profile_noop": true,
+    "postconditions_compare_intended_bytes": true,
+    "software_no_target_stage_or_rollback_dirs": true,
+    "cleanup_journal_immutable_pending": true,
+    "cleanup_journal_top_level_pending": true,
+    "cleanup_journal_publication": "complete temp write, mode, file fsync, hard-link no-replace final path, parent fsync, final open/validate",
+    "cleanup_journal_commit_point": "final-path publication",
+    "cleanup_journal_hardlink_alias_recovery": "mutation-only under exclusive target coordination",
+    "cleanup_journal_read_only_recovery": false,
+    "cleanup_journal_serialized_max_bytes": 33554432,
+    "cleanup_journal_fixed_parent": "$GROK_HOME/.nddev-grok-build/tmp",
+    "cleanup_journal_path": "$GROK_HOME/.nddev-grok-build/cleanup/NDDEV-GROK-BUILD-CLEANUP.json",
+    "cleanup_pending_status_metadata": [
+      "cleanup_pending",
+      "cleanup_pending_roots",
+      "cleanup_pending_entries"
+    ],
+    "cleanup_pending_noop_exception": "draining pending cleanup is lifecycle work, not a true no-op",
+    "supported_host_preflight_before_target_resolution": true,
+    "external_bootstrap_lock": "fixed resolved system temp root/.nddev-grok-build-app.uid-<uid>/global.lock plus target-locks/<sha256(namespace+canonical-target)>.lock",
+    "external_bootstrap_lock_system_root": "resolved /tmp; /private/tmp on macOS, /tmp on Ubuntu",
     "external_bootstrap_lock_product_root_mode": "0700",
     "external_bootstrap_lock_file_mode": "0600",
     "external_bootstrap_lock_persistent": true,
     "external_bootstrap_lock_unlinked_on_release": false,
-    "external_bootstrap_lock_binding": "complete JSON schema_version/product_name/namespace/canonical_target/lock_id before final-path publication",
-    "external_bootstrap_lock_target_identity": "resolved real parent plus literal target basename",
+    "external_bootstrap_product_anchor": "global.lock",
+    "external_bootstrap_target_anchor_root": "target-locks",
+    "external_bootstrap_target_anchor_suffix": ".lock",
+    "external_bootstrap_lock_binding": "product JSON schema_version/product_name/namespace/anchor; target JSON schema_version/product_name/namespace/canonical_target/lock_id",
+    "external_bootstrap_lock_target_identity": "canonical target derived under product coordination; cold read-only no-anchor path creates no product or target anchor",
     "external_bootstrap_lock_from_ambient_tmpdir": false,
     "external_bootstrap_lock_child_env": false,
-    "external_lock_atomic_no_replace": true,
-    "external_lock_no_replace_primitives": ["darwin renameatx_np RENAME_EXCL", "linux renameat2 RENAME_NOREPLACE"],
-    "external_lock_empty_partial_malformed_fail_closed": true,
-    "external_lock_stage_recovery_mutation_only": true,
-    "external_lock_stage_recovery_max_aliases": 8,
-    "external_lock_namespace_max_entries": 4096,
-    "external_read_only_no_create": true,
-    "external_read_only_cold_namespace_empty_required": true,
-    "external_read_only_cold_namespace_identity_retry": true,
     "external_lock_acquired_before_target_inspection": true,
-    "lock": "$GROK_HOME/.nddev-grok-build/locks/target.lock",
-    "lock_parent": "$GROK_HOME/.nddev-grok-build/locks",
-    "lock_type": "persistent regular file with fcntl.flock",
+    "external_anchor_publication": "complete temp write, mode, file fsync, hard-link no-replace final path, parent fsync, final open/validate",
+    "external_anchor_commit_point": "final-path publication",
+    "external_anchor_hardlink_alias_recovery": true,
+    "external_anchor_final_unlinked_on_recovery": false,
+    "external_read_only_cold_no_anchor_creates_lock": false,
+    "external_read_only_cold_namespace_empty_required": true,
+    "external_read_only_cold_namespace_entries_fail_closed": true,
+    "external_read_only_cold_namespace_identity_retry": true,
+    "external_read_only_cold_no_anchor_post_observation_retry": true,
+    "external_read_only_seeded_uses_product_coordination": true,
+    "same_canonical_target_serialized": true,
+    "different_canonical_targets_concurrent_after_handoff": true,
+    "lock_type": "persistent external regular files with fcntl.flock",
     "lock_file_mode": "0600",
     "control_root_mode_while_locked": "0700",
-    "lock_parent_mode_while_held": "0500",
-    "lock_parent_mode_when_unlocked": "0700",
-    "lock_held_through_launch_child": true,
+    "target_local_lock_created": false,
+    "target_anchor_lock_held_through_launch_child": true,
     "lock_crash_recovery": true,
-    "lock_order": "external bootstrap lock first, target-internal lock second; release target-internal first, external last",
+    "lock_order": "product anchor lock first, canonical target anchor handoff second; different targets run concurrently after product handoff",
     "restore_prevalidates_backup_before_mutation": true,
     "restore_post_validates_clean_state": true,
     "restore_rollback_byte_identical_on_failure": true,

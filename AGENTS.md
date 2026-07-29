@@ -15,7 +15,7 @@ documentation only.
 
 ## Public Facts
 
-- Runtime versions and installer provenance are owned by `build/version.json`,
+- Runtime versions and artifact provenance are owned by `build/version.json`,
   `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.
 - Managed file projection is owned by `cli-tools/nddev_grok_build.py` and checked
   by `cli-tools/validate_public_contracts.py`.
@@ -23,9 +23,6 @@ documentation only.
 
 ## Development Checks
 
-Run from this module root:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/validate_public_contracts.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/nddev_grok_build.py list --json
-```
+Use `cli-tools/validate_public_contracts.py` from the module root for the
+cache-free public contract, documented-command, and archive smoke validation it
+owns. Invoke direct public Python checks with bytecode disabled.

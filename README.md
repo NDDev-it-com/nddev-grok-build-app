@@ -8,26 +8,21 @@ and preserves unmanaged state in the target.
 
 ## Commands
 
-```bash
-python3 cli-tools/nddev_grok_build.py list --json
-python3 cli-tools/nddev_grok_build.py status --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py plan --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py install --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py switch --target /absolute/grok-home --profile safe --json
-python3 cli-tools/nddev_grok_build.py migrate --target /absolute/grok-home --profile full-auto --json
-python3 cli-tools/nddev_grok_build.py restore --backup 0 --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py remove --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py software-status --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py install-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py update-cli --target /absolute/grok-home --json
-python3 cli-tools/nddev_grok_build.py launch --target /absolute/grok-home --workspace /absolute/project -- -p "Explain this repo"
-```
+Use `cli-tools/nddev_grok_build.py --help` for the current command surface.
+Commands that mutate or inspect managed state require an explicit absolute
+target. `update` refreshes the currently installed setup/profile identity from
+the module sources; `update-cli` refreshes target-owned Grok Build software.
 
-`install-cli` and `update-cli` install target-owned Grok Build through the
-official stable-channel vendor installer with an exact version argument and
-SHA-256 verification. The current version, npm integrity, installer URL, and
-hash are code-owned in `build/version.json`,
+`install-cli`, `update-cli`, and `remove-cli` manage target-owned Grok Build
+without touching setup, auth, or unrelated target state. Install and update use
+verified official npm tarballs for the umbrella package and selected native
+package. Package scripts are not run; the official installer is retained only as
+source metadata. The current version, package integrity, installer observation,
+and materialization bounds are code-owned in `build/version.json`,
 `references/grok-build-baseline.json`, and `cli-tools/nddev_grok_build.py`.
+All target-bound setup, software, status, plan, restore, remove, and launch
+commands reject unsupported hosts before target resolution or runtime side
+effects. Product runtime management is scoped to macOS and Ubuntu hosts.
 
 ## Setup And Profiles
 
@@ -66,9 +61,7 @@ content files only, not native binaries or external runtimes.
 
 `launch` executes only the target-owned `<target>/bin/grok` with
 `GROK_HOME=<target>`, target-local child `HOME` and `TMPDIR`, auto-updates
-disabled, and provider credentials stripped from the inherited environment. The
-managed target is not the project workspace: launch uses explicit `--workspace`
-or the caller cwd, passes it as child `cwd`, and binds Grok Build's native
-`--cwd` to the same directory. It rejects Grok Build flags that override managed
-target, session, model, permission, sandbox, tool, plugin, cwd, or system-prompt
-scope and never falls back to `PATH`.
+disabled, and provider credentials stripped from the inherited environment. It
+rejects Grok Build flags that override managed target, session, model,
+permission, sandbox, tool, plugin, cwd, or system-prompt scope and never falls
+back to `PATH`.

@@ -2,8 +2,7 @@
 
 `nddev-grok-build-app` owns only target-explicit Grok Build configuration and
 target-owned Grok Build software. The target must be an absolute directory and
-is treated as `GROK_HOME` only for manager operations and launch. Project
-workspace selection is separate and source-owned by the manager launch command.
+is treated as `GROK_HOME` only for manager operations and launch.
 
 ## Managed State
 
@@ -24,8 +23,11 @@ Target lifecycle commands serialize through manager-owned lifecycle locks.
 Cooperative manager operations for the same target are denied or serialized
 while setup mutation, software mutation, restore, remove, migrate, status-read
 requiring owned state, or managed launch is in progress. The exact bootstrap and
-target-local lock mechanics are intentionally not copied here; use the manager
+external canonical-target lock mechanics are intentionally not copied here; use the manager
 source and the public contract fields as the executable reference.
+The setup `update` command refreshes the installed setup/profile identity from
+module-owned sources; it is distinct from `update-cli`, which only manages the
+target-owned Grok Build runtime.
 
 ## Content Setup
 
@@ -54,28 +56,39 @@ memory, subagents, LSP, write, web fetch, or tool search.
 
 ## Target-Owned Software
 
-`software-status`, `install-cli`, and `update-cli` manage the Grok Build runtime
-separately from setup/profile switching. Production installs use only the
-official installer and pin metadata recorded in `cli-tools/nddev_grok_build.py`,
-`build/version.json`, and `references/grok-build-baseline.json`.
+`software-status`, `install-cli`, `update-cli`, and `remove-cli` manage the Grok
+Build runtime separately from setup/profile switching. Production installs use
+verified official npm tarballs and pin metadata recorded in
+`cli-tools/nddev_grok_build.py`, `build/version.json`, and
+`references/grok-build-baseline.json`. The manager does not run npm install or
+package scripts; Node is resolved from fixed absolute candidates and is used
+only for deterministic Brotli decompression of the verified native archive.
+Removal is limited to manager-owned runtime state and preserves setup content,
+auth, and unrelated target files.
+NDDev runtime management is product-scoped to macOS and Ubuntu desktop/server.
+The Ubuntu gate is an NDDev product boundary over the vendor Linux artifact:
+upstream has not published an Ubuntu version or glibc floor. Canonical product
+host ids, unsupported host categories, and vendor artifact/package observations
+are source-owned by `config/nddev-contract.json`,
+`build/manifest.json`, `references/grok-build-baseline.json`, and the manager's
+platform detection functions.
+Unsupported hosts are rejected before target resolution, target inspection,
+target creation, locks, artifact network/stage work, or launch child execution.
 
-The vendor installer runs in an isolated staging area. The manager validates the
-staged runtime, then persists only target-owned software state defined by the
-manager and public contract. Vendor staging side effects that are not part of
+Verified artifacts are processed in an isolated staging area. The manager
+validates the staged runtime, then persists only target-owned software state
+defined by the manager and public contract. Staging files that are not part of
 the managed runtime are discarded.
-Ordinary installer fetch and protocol failures are reported as stable manager
+Ordinary artifact fetch and protocol failures are reported as stable manager
 JSON errors with exit code `2`; interrupts and process exits are not swallowed.
 
 `status` reports `launchable: true` only when setup content has no drift and
 target-owned Grok Build software is current. Managed launch keeps the lifecycle
 serialization guarantee through the child process and runs a verified
-target-owned Grok Build entrypoint. The child working directory is explicit:
-`--workspace` selects an absolute existing project directory, and omitting it
-captures the caller cwd. Exact child handoff, executable validation, native
-`--cwd` binding, and cleanup details are source-owned by
-`cli-tools/nddev_grok_build.py` and the runtime transaction policy in
-`build/manifest.json`. Lifecycle, auth, plugin, marketplace, and MCP mutating
-subcommands are denied through managed launch.
+target-owned Grok Build entrypoint. Exact child handoff, executable validation,
+and cleanup details are source-owned by `cli-tools/nddev_grok_build.py` and the
+runtime transaction policy in `build/manifest.json`. Lifecycle, auth, plugin,
+marketplace, and MCP mutating subcommands are denied through managed launch.
 Cooperative same-user manager operations are serialized; direct malicious
 same-user mutation of the target or bootstrap root, especially under `full-auto`
 sandbox `off`, is outside the cross-user isolation boundary.
@@ -89,12 +102,7 @@ requires an explicit `--profile` during migration.
 
 ## Validation
 
-Run public, non-live checks from the module root:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/validate_public_contracts.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/tmp/nddev-grok-build-pycache python3 -B cli-tools/nddev_grok_build.py list --json
-```
-
-Use isolated temporary targets for lifecycle checks. Do not run `install-cli` or
-`update-cli` against live user state.
+Public validation is owned by `cli-tools/validate_public_contracts.py`, which
+also checks the cache-free documented command surface. Use isolated temporary
+targets for lifecycle checks. Do not run software lifecycle commands against
+live user state.

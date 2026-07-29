@@ -10,6 +10,63 @@
   "grok_build_installer": "https://x.ai/cli/install.sh",
   "grok_build_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
   "nddev_builder_plugin_version": "0.2.0",
-  "python_requires": ">=3.10",
-  "runtime_baseline_ref": "references/grok-build-baseline.json"
+  "python_requires": ">=3.9",
+  "runtime_baseline_ref": "references/grok-build-baseline.json",
+  "grok_build_install_mechanism": "verified-npm-tarball",
+  "grok_build_npm_tarball_max_bytes": 1048576,
+  "grok_build_npm_unpacked_size": 17281,
+  "grok_build_npm_file_count": 4,
+  "grok_build_native_packages": {
+    "macos-arm64": {
+      "package": "@xai-official/grok-darwin-arm64",
+      "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
+      "shasum": "436870a7708674ca1848e4682abc9babf1380791",
+      "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
+      "unpacked_size": 37113280,
+      "file_count": 4,
+      "os": "darwin",
+      "cpu": "arm64",
+      "binary_member": "package/bin/grok.br",
+      "product_supported": true
+    },
+    "macos-x64": {
+      "package": "@xai-official/grok-darwin-x64",
+      "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
+      "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
+      "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
+      "unpacked_size": 43142250,
+      "file_count": 4,
+      "os": "darwin",
+      "cpu": "x64",
+      "binary_member": "package/bin/grok.br",
+      "product_supported": true
+    },
+    "ubuntu-glibc-arm64": {
+      "package": "@xai-official/grok-linux-arm64",
+      "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
+      "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
+      "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
+      "unpacked_size": 40192893,
+      "file_count": 4,
+      "os": "linux",
+      "cpu": "arm64",
+      "binary_member": "package/bin/grok.br",
+      "product_supported": true
+    },
+    "ubuntu-glibc-x64": {
+      "package": "@xai-official/grok-linux-x64",
+      "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
+      "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
+      "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
+      "unpacked_size": 45242318,
+      "file_count": 4,
+      "os": "linux",
+      "cpu": "x64",
+      "binary_member": "package/bin/grok.br",
+      "product_supported": true
+    }
+  },
+  "grok_build_node_requires": ">=20",
+  "grok_build_package_scripts_disabled": true,
+  "grok_build_installer_observation_only": true
 }

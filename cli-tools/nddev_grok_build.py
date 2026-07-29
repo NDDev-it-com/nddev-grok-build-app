@@ -16,7 +16,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -63,6 +62,7 @@ BOOTSTRAP_LOCK_NAMESPACE = TARGET_LOCK_NAMESPACE
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
+OBJECT_GRAPH_MAX_ENTRIES = 8192
 READ_LIFECYCLE_MAX_ATTEMPTS = 4
 ANCHOR_STAGE_MAX_ALIASES = 8
 ANCHOR_STAGE_NUMBER_MAX_DIGITS = 20
@@ -246,6 +246,28 @@ class DirectoryMetadata(NamedTuple):
     size: int
     atime_ns: int
     mtime_ns: int
+
+
+class ObjectEntry(NamedTuple):
+    kind: str
+    dev: int | None
+    ino: int | None
+    mode: int | None
+    uid: int | None
+    gid: int | None
+    nlink: int | None
+    size: int | None
+    mtime_ns: int | None
+    sha256: str | None
+    data: bytes | None
+    children: tuple[str, ...] | None
+
+
+class HeldObject(NamedTuple):
+    original: Path
+    hold: Path
+    entry: dict[str, ObjectEntry]
+    label: str
 
 
 class AnchorStageAlias(NamedTuple):
@@ -679,6 +701,257 @@ def restore_observed_directory_metadata(
         fail(f"{label} mode changed after recovery")
     if final.atime_ns != snapshot.atime_ns or final.mtime_ns != snapshot.mtime_ns:
         fail(f"{label} timestamp changed after recovery")
+
+
+def read_regular_file_fd(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    expected_mode: int | None = None,
+) -> tuple[bytes, os.stat_result]:
+    before = require_existing_managed_file(
+        path, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
+    if before is None:
+        fail(f"{label} is missing")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            fail(f"{label} changed while opening")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            fail(f"{label} changed to an unsafe file")
+        require_current_user_owner(opened, label)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                fail(f"{label} is too large")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = require_existing_managed_file(
+        path, label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
+    expected = (before.st_dev, before.st_ino)
+    if (
+        final is None
+        or (after.st_dev, after.st_ino) != expected
+        or (
+            final.st_dev,
+            final.st_ino,
+        )
+        != expected
+    ):
+        fail(f"{label} changed while reading")
+    if (
+        stat.S_IMODE(after.st_mode) != stat.S_IMODE(before.st_mode)
+        or stat.S_IMODE(final.st_mode) != stat.S_IMODE(before.st_mode)
+        or int(after.st_size) != int(before.st_size)
+        or int(final.st_size) != int(before.st_size)
+        or int(after.st_mtime_ns) != int(before.st_mtime_ns)
+        or int(final.st_mtime_ns) != int(before.st_mtime_ns)
+    ):
+        fail(f"{label} metadata changed while reading")
+    return b"".join(chunks), final
+
+
+def absent_object_entry() -> ObjectEntry:
+    return ObjectEntry(
+        kind="absent",
+        dev=None,
+        ino=None,
+        mode=None,
+        uid=None,
+        gid=None,
+        nlink=None,
+        size=None,
+        mtime_ns=None,
+        sha256=None,
+        data=None,
+        children=None,
+    )
+
+
+def absent_tree_state() -> dict[str, ObjectEntry]:
+    return {".": absent_object_entry()}
+
+
+def object_entry(path: Path, label: str, *, max_bytes: int) -> ObjectEntry:
+    info = stat_existing(path, label)
+    if info is None:
+        return absent_object_entry()
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISREG(info.st_mode):
+        data, final = read_regular_file_fd(path, max_bytes=max_bytes, label=label)
+        return ObjectEntry(
+            kind="file",
+            dev=int(final.st_dev),
+            ino=int(final.st_ino),
+            mode=stat.S_IMODE(final.st_mode),
+            uid=int(final.st_uid),
+            gid=int(final.st_gid),
+            nlink=int(final.st_nlink),
+            size=int(final.st_size),
+            mtime_ns=int(final.st_mtime_ns),
+            sha256=sha256_bytes(data),
+            data=data,
+            children=None,
+        )
+    if stat.S_ISDIR(info.st_mode):
+        require_current_user_owner(info, label)
+        if mode != OWNER_DIRECTORY_MODE:
+            fail(f"{label} must have mode 0700")
+        children = tuple(sorted(child.name for child in path.iterdir()))
+        return ObjectEntry(
+            kind="directory",
+            dev=int(info.st_dev),
+            ino=int(info.st_ino),
+            mode=mode,
+            uid=int(info.st_uid),
+            gid=int(info.st_gid),
+            nlink=int(info.st_nlink),
+            size=int(info.st_size),
+            mtime_ns=int(info.st_mtime_ns),
+            sha256=None,
+            data=None,
+            children=children,
+        )
+    fail(f"{label} must be a regular file or directory")
+
+
+def snapshot_object_tree(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int,
+    max_entries: int = OBJECT_GRAPH_MAX_ENTRIES,
+) -> dict[str, ObjectEntry]:
+    root = object_entry(path, label, max_bytes=max_bytes)
+    snapshot = {".": root}
+    if root.kind != "directory":
+        return snapshot
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        for child in sorted(current.iterdir(), key=lambda item: item.name):
+            relative = child.relative_to(path).as_posix()
+            if len(snapshot) >= max_entries:
+                fail(f"{label} has too many entries")
+            entry = object_entry(child, f"{label} {relative}", max_bytes=max_bytes)
+            snapshot[relative] = entry
+            if entry.kind == "directory":
+                stack.append(child)
+    return snapshot
+
+
+def verify_object_tree(
+    path: Path,
+    expected: dict[str, ObjectEntry],
+    label: str,
+    *,
+    max_bytes: int,
+) -> None:
+    actual = snapshot_object_tree(path, label, max_bytes=max_bytes)
+    if actual != expected:
+        fail(f"{label} changed from the expected object graph")
+
+
+def fsync_parent_directory(path: Path, label: str) -> None:
+    fsync_directory(path.parent, f"{label} parent")
+
+
+def remove_object_tree_exact(
+    path: Path,
+    expected: dict[str, ObjectEntry],
+    label: str,
+    *,
+    max_bytes: int,
+) -> None:
+    verify_object_tree(path, expected, label, max_bytes=max_bytes)
+    ordered = sorted(expected.items(), key=lambda item: len(Path(item[0]).parts), reverse=True)
+    for relative, entry in ordered:
+        current_path = path if relative == "." else path / relative
+        if entry.kind == "absent":
+            continue
+        if entry.kind == "file":
+            current = object_entry(current_path, f"{label} {relative}", max_bytes=max_bytes)
+            if current != entry:
+                fail(f"{label} {relative} changed before removal")
+            current_path.unlink()
+            fsync_parent_directory(current_path, f"{label} {relative} removal")
+        elif entry.kind == "directory" and relative != ".":
+            current = object_entry(current_path, f"{label} {relative}", max_bytes=max_bytes)
+            if (
+                current.kind != "directory"
+                or current.dev != entry.dev
+                or current.ino != entry.ino
+                or current.mode != entry.mode
+                or current.uid != entry.uid
+                or current.gid != entry.gid
+                or current.children != ()
+            ):
+                fail(f"{label} {relative} changed before directory removal")
+            current_path.rmdir()
+            fsync_parent_directory(current_path, f"{label} {relative} removal")
+    root_entry = expected["."]
+    if root_entry.kind == "file":
+        return
+    if root_entry.kind == "directory":
+        current = object_entry(path, label, max_bytes=max_bytes)
+        if (
+            current.kind != "directory"
+            or current.dev != root_entry.dev
+            or current.ino != root_entry.ino
+            or current.mode != root_entry.mode
+            or current.uid != root_entry.uid
+            or current.gid != root_entry.gid
+            or current.children != ()
+        ):
+            fail(f"{label} root changed before removal")
+        path.rmdir()
+        fsync_parent_directory(path, f"{label} root removal")
+
+
+def restore_parent_metadata(path: Path, snapshot: DirectoryMetadata, label: str) -> None:
+    current = observed_directory_metadata(path, label)
+    if (current.dev, current.ino) != (snapshot.dev, snapshot.ino):
+        fail(f"{label} identity changed during rollback")
+    if (current.uid, current.gid) != (snapshot.uid, snapshot.gid):
+        fail(f"{label} owner changed during rollback")
+    if current.mode != snapshot.mode:
+        path.chmod(snapshot.mode)
+    os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns), follow_symlinks=False)
+    fsync_directory(path, f"{label} rollback metadata")
+    final = observed_directory_metadata(path, label)
+    if (
+        final.dev != snapshot.dev
+        or final.ino != snapshot.ino
+        or final.uid != snapshot.uid
+        or final.gid != snapshot.gid
+        or final.mode != snapshot.mode
+        or final.mtime_ns != snapshot.mtime_ns
+    ):
+        mismatches = [
+            name
+            for name in ("dev", "ino", "uid", "gid", "mode", "mtime_ns")
+            if getattr(final, name) != getattr(snapshot, name)
+        ]
+        fail(f"{label} metadata did not restore exactly: {', '.join(mismatches)}")
 
 
 def require_anchor_file_stat(info: os.stat_result, label: str) -> None:
@@ -1816,21 +2089,42 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
 def target_lock(target: Path, *, create: bool):
     created_parent_chain: list[Path] = []
     remove_empty_target = False
+    target_parent_snapshot: tuple[Path, DirectoryMetadata] | None = None
+    target_snapshot: DirectoryMetadata | None = None
+    control_snapshot: DirectoryMetadata | None = None
+    lock_parent_snapshot: DirectoryMetadata | None = None
     bootstrap_descriptor: int | None = None
     descriptor: int | None = None
     locked_parent = False
     restore_error: BaseException | None = None
+    operation_error: BaseException | None = None
     try:
         bootstrap_descriptor = acquire_bootstrap_lock(target)
         created_parent_chain = missing_directory_chain(target.parent)
         remove_empty_target = create and not (target.exists() or target.is_symlink())
+        if remove_empty_target and target.parent.exists() and not target.parent.is_symlink():
+            target_parent_snapshot = (
+                target.parent,
+                observed_directory_metadata(target.parent, "target parent"),
+            )
         target = validate_target(target, create=create)
         if not create and not target.exists() and not target.is_symlink():
             fail("target is missing")
         descriptor = acquire_target_lock(target)
+        control_snapshot = observed_directory_metadata(
+            managed_control_dir(target), "NDDev control root"
+        )
+        lock_parent_snapshot = observed_directory_metadata(
+            lock_parent_dir(target), "target lock parent"
+        )
         prepare_locked_lock_parent(target)
         locked_parent = True
-        yield target
+        target_snapshot = observed_directory_metadata(target, "target")
+        try:
+            yield target
+        except BaseException as exc:
+            operation_error = exc
+            raise
     finally:
         if locked_parent:
             try:
@@ -1844,8 +2138,26 @@ def target_lock(target: Path, *, create: bool):
         prune_empty_control_dirs(target)
         if remove_empty_target:
             remove_created_lock_state_if_empty(target)
-            remove_empty_directory_if_created(target, existed_before=False)
+            removed_target = remove_empty_directory_if_created(target, existed_before=False)
+            if removed_target and target_parent_snapshot is not None:
+                parent, snapshot = target_parent_snapshot
+                restore_parent_metadata(parent, snapshot, "target parent")
         remove_created_empty_directories(created_parent_chain)
+        if (
+            operation_error is not None
+            and target_snapshot is not None
+            and target.exists()
+            and not target.is_symlink()
+        ):
+            if lock_parent_snapshot is not None and lock_parent_dir(target).exists():
+                restore_parent_metadata(
+                    lock_parent_dir(target), lock_parent_snapshot, "target lock parent"
+                )
+            if control_snapshot is not None and managed_control_dir(target).exists():
+                restore_parent_metadata(
+                    managed_control_dir(target), control_snapshot, "NDDev control root"
+                )
+            restore_parent_metadata(target, target_snapshot, "target")
         if bootstrap_descriptor is not None:
             release_bootstrap_lock(bootstrap_descriptor)
         if restore_error is not None:
@@ -1898,6 +2210,318 @@ def ensure_real_parent(path: Path, target: Path) -> None:
             fail(f"managed directory must have mode 0700: {current}")
 
 
+class ObjectGraphTransaction:
+    def __init__(self, target: Path, label: str, *, max_bytes: int = MANAGED_MAX_BYTES) -> None:
+        self.target = target
+        self.label = label
+        self.max_bytes = max_bytes
+        nonce = f"{os.getpid()}.{time.time_ns()}"
+        self.root = control_tmp_dir(target) / f"object-transaction.{nonce}"
+        self.hold_root = self.root / "held"
+        self.held: list[HeldObject] = []
+        self.active: list[tuple[Path, dict[str, ObjectEntry], str]] = []
+        self.parent_snapshots: dict[Path, DirectoryMetadata] = {}
+        self.created_dirs: list[tuple[Path, DirectoryMetadata]] = []
+        self.started = False
+        self.finished = False
+
+    def begin(self) -> "ObjectGraphTransaction":
+        require_control_directory(
+            managed_control_dir(self.target), "NDDev control root", allow_locked=True
+        )
+        ensure_private_directory(control_tmp_dir(self.target), "NDDev control tmp")
+        self._remember_parent(self.root, "object transaction root")
+        self.root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        self.root.chmod(OWNER_DIRECTORY_MODE)
+        self.hold_root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        self.hold_root.chmod(OWNER_DIRECTORY_MODE)
+        require_private_directory(self.root, "object transaction root")
+        require_private_directory(self.hold_root, "object transaction hold root")
+        fsync_directory(control_tmp_dir(self.target), "NDDev control tmp")
+        self.started = True
+        return self
+
+    def _remember_parent(self, path: Path, label: str) -> None:
+        parent = path.parent
+        if parent in self.parent_snapshots:
+            return
+        self.parent_snapshots[parent] = observed_directory_metadata(parent, f"{label} parent")
+
+    def _hold_path_for(self, path: Path) -> Path:
+        digest = sha256_bytes(str(path).encode("utf-8"))
+        return self.hold_root / digest
+
+    def _ensure_parent(self, path: Path, label: str) -> None:
+        try:
+            relative_parent = path.relative_to(self.target).parent
+        except ValueError:
+            fail(f"{label} is outside the managed target")
+        current = self.target
+        for part in relative_parent.parts:
+            current = current / part
+            info = stat_existing(current, f"{label} parent {current}")
+            if info is None:
+                parent_snapshot = observed_directory_metadata(
+                    current.parent, f"{label} parent {current.parent}"
+                )
+                current.mkdir(mode=OWNER_DIRECTORY_MODE)
+                current.chmod(OWNER_DIRECTORY_MODE)
+                require_private_directory(current, f"{label} parent {current}")
+                fsync_directory(current.parent, f"{label} parent create")
+                self.created_dirs.append((current, parent_snapshot))
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                fail(f"{label} parent is not a directory: {current}")
+            require_current_user_owner(info, f"{label} parent {current}")
+            if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+                fail(f"{label} parent must have mode 0700: {current}")
+
+    def _hold_existing(
+        self,
+        path: Path,
+        label: str,
+        expected_current: dict[str, ObjectEntry] | None = None,
+    ) -> dict[str, ObjectEntry]:
+        if expected_current is not None:
+            verify_object_tree(path, expected_current, label, max_bytes=self.max_bytes)
+            entry = expected_current
+        else:
+            entry = snapshot_object_tree(path, label, max_bytes=self.max_bytes)
+        if entry["."].kind == "absent":
+            return entry
+        hold = self._hold_path_for(path)
+        if hold.exists() or hold.is_symlink():
+            fail(f"{label} rollback hold path already exists")
+        self._remember_parent(path, label)
+        self._remember_parent(hold, f"{label} hold")
+        verify_object_tree(path, entry, label, max_bytes=self.max_bytes)
+        os.rename(path, hold)
+        fsync_parent_directory(path, f"{label} hold")
+        fsync_parent_directory(hold, f"{label} hold")
+        verify_object_tree(hold, entry, f"{label} hold", max_bytes=self.max_bytes)
+        if object_entry(path, label, max_bytes=self.max_bytes).kind != "absent":
+            fail(f"{label} remained visible after rollback hold")
+        self.held.append(HeldObject(path, hold, entry, label))
+        return entry
+
+    def write_file(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        mode: int,
+        label: str,
+        expected_current: dict[str, ObjectEntry] | None = None,
+    ) -> None:
+        if len(data) > self.max_bytes:
+            fail(f"{label} is too large")
+        self._ensure_parent(path, label)
+        current = object_entry(path, label, max_bytes=self.max_bytes)
+        if expected_current is not None:
+            verify_object_tree(path, expected_current, label, max_bytes=self.max_bytes)
+            current = expected_current["."]
+        if current.kind == "directory":
+            fail(f"{label} must not be a directory")
+        if current.kind == "file" and current.data == data and current.mode == mode:
+            return
+        self._remember_parent(path, label)
+        temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+        temporary_entry: dict[str, ObjectEntry] | None = None
+        descriptor = -1
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, mode)
+            os.fchmod(descriptor, mode)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, data[offset:])
+                if written <= 0:
+                    fail(f"{label} write made no progress")
+                offset += written
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            temporary_entry = snapshot_object_tree(
+                temporary, f"{label} temporary", max_bytes=self.max_bytes
+            )
+            if temporary_entry["."].data != data or temporary_entry["."].mode != mode:
+                fail(f"{label} temporary does not match intended state")
+            self._hold_existing(path, label, expected_current)
+            if object_entry(path, label, max_bytes=self.max_bytes).kind != "absent":
+                fail(f"{label} destination is not clear before publication")
+            self._remember_parent(path, label)
+            os.rename(temporary, path)
+            fsync_parent_directory(path, label)
+            expected = snapshot_object_tree(path, label, max_bytes=self.max_bytes)
+            if expected["."].data != data or expected["."].mode != mode:
+                fail(f"{label} postcondition does not match intended state")
+            self.active.append((path, expected, label))
+        except BaseException:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            if temporary_entry is not None and (temporary.exists() or temporary.is_symlink()):
+                remove_object_tree_exact(
+                    temporary,
+                    temporary_entry,
+                    f"{label} temporary",
+                    max_bytes=self.max_bytes,
+                )
+            elif temporary.exists() or temporary.is_symlink():
+                fail(f"{label} temporary could not be verified for cleanup")
+            raise
+
+    def publish_path(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        label: str,
+        expected_current: dict[str, ObjectEntry] | None = None,
+    ) -> None:
+        source_entry = snapshot_object_tree(source, f"{label} source", max_bytes=self.max_bytes)
+        if source_entry["."].kind == "absent":
+            fail(f"{label} source is missing")
+        self._ensure_parent(destination, label)
+        current = object_entry(destination, label, max_bytes=self.max_bytes)
+        if expected_current is not None:
+            verify_object_tree(destination, expected_current, label, max_bytes=self.max_bytes)
+            current = expected_current["."]
+        if current.kind != "absent":
+            self._hold_existing(destination, label, expected_current)
+        self._remember_parent(source, f"{label} source")
+        self._remember_parent(destination, label)
+        verify_object_tree(source, source_entry, f"{label} source", max_bytes=self.max_bytes)
+        if object_entry(destination, label, max_bytes=self.max_bytes).kind != "absent":
+            fail(f"{label} destination is not clear before publication")
+        os.rename(source, destination)
+        fsync_parent_directory(source, f"{label} source")
+        fsync_parent_directory(destination, label)
+        expected = snapshot_object_tree(destination, label, max_bytes=self.max_bytes)
+        self.active.append((destination, expected, label))
+
+    def remove_path(
+        self,
+        path: Path,
+        *,
+        label: str,
+        expected_current: dict[str, ObjectEntry] | None = None,
+    ) -> None:
+        current = object_entry(path, label, max_bytes=self.max_bytes)
+        if expected_current is not None:
+            verify_object_tree(path, expected_current, label, max_bytes=self.max_bytes)
+            current = expected_current["."]
+        if current.kind == "absent":
+            return
+        self._hold_existing(path, label, expected_current)
+        if object_entry(path, label, max_bytes=self.max_bytes).kind != "absent":
+            fail(f"{label} remained after removal")
+
+    def make_directory(
+        self,
+        path: Path,
+        *,
+        label: str,
+        expected_current: dict[str, ObjectEntry] | None = None,
+    ) -> None:
+        self._ensure_parent(path, label)
+        current = object_entry(path, label, max_bytes=self.max_bytes)
+        if expected_current is not None:
+            verify_object_tree(path, expected_current, label, max_bytes=self.max_bytes)
+            current = expected_current["."]
+        if current.kind == "directory":
+            return
+        if current.kind != "absent":
+            fail(f"{label} must not be a file")
+        parent_snapshot = observed_directory_metadata(path.parent, f"{label} parent")
+        self._remember_parent(path, label)
+        path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        fsync_parent_directory(path, label)
+        expected = snapshot_object_tree(path, label, max_bytes=self.max_bytes)
+        if expected["."].kind != "directory" or expected["."].mode != OWNER_DIRECTORY_MODE:
+            fail(f"{label} postcondition does not match intended directory")
+        self.created_dirs.append((path, parent_snapshot))
+
+    def prune_empty_managed_dirs(self) -> None:
+        candidates: set[Path] = set()
+        for relative in content_managed_paths():
+            directory = safe_target_path(self.target, relative).parent
+            while directory != self.target and self.target in directory.parents:
+                candidates.add(directory)
+                directory = directory.parent
+        directories = sorted(candidates, key=lambda item: len(item.parts), reverse=True)
+        for directory in directories:
+            entry = object_entry(directory, str(directory), max_bytes=self.max_bytes)
+            if entry.kind == "directory" and entry.children == ():
+                self.remove_path(directory, label=str(directory))
+
+    def rollback(self) -> None:
+        rollback_error: BaseException | None = None
+        try:
+            for path, expected, label in reversed(self.active):
+                current = object_entry(path, label, max_bytes=self.max_bytes)
+                if current.kind == "absent":
+                    continue
+                remove_object_tree_exact(path, expected, label, max_bytes=self.max_bytes)
+            for held in reversed(self.held):
+                verify_object_tree(
+                    held.hold, held.entry, f"{held.label} hold", max_bytes=self.max_bytes
+                )
+                if (
+                    object_entry(held.original, held.label, max_bytes=self.max_bytes).kind
+                    != "absent"
+                ):
+                    fail(f"{held.label} rollback destination is not clear")
+                os.rename(held.hold, held.original)
+                fsync_parent_directory(held.hold, f"{held.label} hold")
+                fsync_parent_directory(held.original, held.label)
+                verify_object_tree(held.original, held.entry, held.label, max_bytes=self.max_bytes)
+            for directory, parent_snapshot in reversed(self.created_dirs):
+                entry = object_entry(directory, str(directory), max_bytes=self.max_bytes)
+                if entry.kind == "directory" and entry.children == ():
+                    directory.rmdir()
+                    fsync_parent_directory(directory, f"{directory} rollback")
+                    restore_parent_metadata(
+                        directory.parent, parent_snapshot, f"{directory.parent} rollback"
+                    )
+                elif entry.kind != "absent":
+                    fail(f"created directory is not empty during rollback: {directory}")
+            if self.root.exists() or self.root.is_symlink():
+                root_entry = snapshot_object_tree(
+                    self.root, "object transaction root", max_bytes=self.max_bytes
+                )
+                remove_object_tree_exact(
+                    self.root,
+                    root_entry,
+                    "object transaction root",
+                    max_bytes=self.max_bytes,
+                )
+            for parent, snapshot in reversed(list(self.parent_snapshots.items())):
+                if parent.exists() and not parent.is_symlink():
+                    restore_parent_metadata(parent, snapshot, f"{parent} rollback")
+        except BaseException as exc:
+            rollback_error = exc
+        if rollback_error is not None:
+            raise rollback_error
+
+    def commit(self) -> None:
+        for path, expected, label in self.active:
+            verify_object_tree(path, expected, label, max_bytes=self.max_bytes)
+        if self.root.exists() or self.root.is_symlink():
+            root_entry = snapshot_object_tree(
+                self.root, "object transaction root", max_bytes=self.max_bytes
+            )
+            remove_object_tree_exact(
+                self.root, root_entry, "object transaction root", max_bytes=self.max_bytes
+            )
+        self.finished = True
+
+
 def require_existing_managed_file(
     path: Path, label: str, *, max_bytes: int, expected_mode: int | None = None
 ) -> os.stat_result | None:
@@ -1919,32 +2543,24 @@ def require_existing_managed_file(
 def read_existing_file(
     path: Path, *, max_bytes: int, label: str, expected_mode: int | None = None
 ) -> bytes | None:
-    info = require_existing_managed_file(
-        path, label, max_bytes=max_bytes, expected_mode=expected_mode
-    )
-    if info is None:
+    if (
+        require_existing_managed_file(path, label, max_bytes=max_bytes, expected_mode=expected_mode)
+        is None
+    ):
         return None
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        fail(f"{label} is too large")
+    data, _info = read_regular_file_fd(
+        path, label=label, max_bytes=max_bytes, expected_mode=expected_mode
+    )
     return data
 
 
 def atomic_write(path: Path, data: bytes, target: Path) -> None:
-    ensure_real_parent(path, target)
-    require_existing_managed_file(path, str(path), max_bytes=MANAGED_MAX_BYTES)
-    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(temporary, flags, OWNER_FILE_MODE)
+    transaction = ObjectGraphTransaction(target, f"atomic write {path}").begin()
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
+        transaction.write_file(path, data, mode=OWNER_FILE_MODE, label=str(path))
+        transaction.commit()
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+        transaction.rollback()
         raise
 
 
@@ -2188,12 +2804,56 @@ def expected_managed_path_set_for_stamp(stamp: dict[str, Any]) -> set[str]:
     return set(content_managed_paths())
 
 
-def desired_files(target: Path, setup: dict[str, Any], profile: dict[str, Any]) -> dict[str, bytes]:
-    existing_config = read_existing_file(
-        target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml"
+def snapshot_data(entry: dict[str, ObjectEntry]) -> bytes | None:
+    root = entry["."]
+    if root.kind == "absent":
+        return None
+    if root.kind != "file":
+        fail("managed path must be a regular file")
+    return root.data
+
+
+def capture_relative_state(
+    target: Path,
+    relatives: set[str] | list[str] | tuple[str, ...],
+    *,
+    max_bytes: int = MANAGED_MAX_BYTES,
+) -> dict[str, dict[str, ObjectEntry]]:
+    return {
+        relative: snapshot_object_tree(
+            safe_target_path(target, relative), relative, max_bytes=max_bytes
+        )
+        for relative in sorted(dict.fromkeys(relatives))
+    }
+
+
+def digest_from_relative_state(relative: str, entry: dict[str, ObjectEntry]) -> str | None:
+    data = snapshot_data(entry)
+    if data is None:
+        return None
+    digest = managed_digest_for_bytes(relative, data)
+    return digest or None
+
+
+def desired_files(
+    target: Path,
+    setup: dict[str, Any],
+    profile: dict[str, Any],
+    existing_state: dict[str, dict[str, ObjectEntry]] | None = None,
+) -> dict[str, bytes]:
+    existing_config = (
+        snapshot_data(existing_state["config.toml"])
+        if existing_state is not None and "config.toml" in existing_state
+        else read_existing_file(
+            target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml"
+        )
     )
-    existing_agents = read_existing_file(
-        target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md"
+    existing_agents = (
+        snapshot_data(existing_state["AGENTS.md"])
+        if existing_state is not None and "AGENTS.md" in existing_state
+        else read_existing_file(
+            target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md"
+        )
     )
     files = {
         "config.toml": merge_managed_block(existing_config, render_config(target, setup, profile)),
@@ -2400,43 +3060,78 @@ def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
 
 def choose_backup_slot(pool: Path) -> int:
     require_control_directory(pool.parent, "NDDev control root", allow_locked=False)
-    ensure_private_directory(pool, "backup pool")
+    if not pool.exists() and not pool.is_symlink():
+        return 0
+    require_private_directory(pool, "backup pool")
     for slot in range(10):
         if not (pool / str(slot)).exists():
             return slot
     return min(range(10), key=lambda item: (pool / str(item)).stat().st_mtime_ns)
 
 
-def create_backup(target: Path, stamp: dict[str, Any]) -> int:
+def create_backup(
+    target: Path,
+    stamp: dict[str, Any],
+    transaction: ObjectGraphTransaction | None = None,
+    source_state: dict[str, dict[str, ObjectEntry]] | None = None,
+) -> int:
+    own_transaction = transaction is None
+    if transaction is None:
+        transaction = ObjectGraphTransaction(target, "backup creation").begin()
     pool = backup_pool(target)
     slot = choose_backup_slot(pool)
     slot_dir = pool / str(slot)
-    if slot_dir.exists():
-        require_private_directory(slot_dir, "backup slot")
-        shutil.rmtree(slot_dir)
-    slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
-    slot_dir.chmod(OWNER_DIRECTORY_MODE)
-    require_private_directory(slot_dir, "backup slot")
-    files: dict[str, Any] = {}
-    managed_paths = sorted(stamp.get("managed_files", {}))
-    for relative in (*managed_paths, STAMP_NAME):
-        data = read_existing_file(
-            safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+    try:
+        if not pool.exists() and not pool.is_symlink():
+            transaction.make_directory(pool, label="backup pool")
+        if slot_dir.exists() or slot_dir.is_symlink():
+            require_private_directory(slot_dir, "backup slot")
+        slot_state = snapshot_object_tree(slot_dir, "backup slot", max_bytes=METADATA_MAX_BYTES)
+        if slot_state["."].kind != "absent":
+            transaction.remove_path(slot_dir, label="backup slot", expected_current=slot_state)
+        transaction.make_directory(
+            slot_dir,
+            label="backup slot",
+            expected_current=absent_tree_state(),
         )
-        files[relative] = None if data is None else base64.b64encode(data).decode("ascii")
-    envelope = {
-        "schema_version": STAMP_SCHEMA_VERSION,
-        "product_name": PRODUCT_NAME,
-        "build_version": VERSION,
-        "slot": slot,
-        "canonical_target": str(validate_target(target, create=False)),
-        "source_setup_id": stamp["setup_id"],
-        "source_profile_id": stamp.get("profile_id"),
-        "source_stamp_schema": stamp.get("schema_version"),
-        "created_at": int(time.time()),
-        "files": files,
-    }
-    atomic_write(slot_dir / BACKUP_NAME, canonical_json(envelope), slot_dir)
+        files: dict[str, Any] = {}
+        managed_paths = sorted(stamp.get("managed_files", {}))
+        for relative in (*managed_paths, STAMP_NAME):
+            data = (
+                snapshot_data(source_state[relative])
+                if source_state is not None and relative in source_state
+                else read_existing_file(
+                    safe_target_path(target, relative),
+                    max_bytes=MANAGED_MAX_BYTES,
+                    label=relative,
+                )
+            )
+            files[relative] = None if data is None else base64.b64encode(data).decode("ascii")
+        envelope = {
+            "schema_version": STAMP_SCHEMA_VERSION,
+            "product_name": PRODUCT_NAME,
+            "build_version": VERSION,
+            "slot": slot,
+            "canonical_target": str(validate_target(target, create=False)),
+            "source_setup_id": stamp["setup_id"],
+            "source_profile_id": stamp.get("profile_id"),
+            "source_stamp_schema": stamp.get("schema_version"),
+            "created_at": int(time.time()),
+            "files": files,
+        }
+        transaction.write_file(
+            slot_dir / BACKUP_NAME,
+            canonical_json(envelope),
+            mode=OWNER_FILE_MODE,
+            label=BACKUP_NAME,
+            expected_current=absent_tree_state(),
+        )
+        if own_transaction:
+            transaction.commit()
+    except BaseException:
+        if own_transaction:
+            transaction.rollback()
+        raise
     return slot
 
 
@@ -2577,7 +3272,10 @@ def write_setup(
             drift = drift_for_stamp(target, current)
             if drift:
                 fail(f"managed target has drift: {', '.join(drift)}")
-        files = desired_files(target, setup, profile)
+        managed_relatives = set(content_managed_paths())
+        managed_relatives.add(STAMP_NAME)
+        prestate = capture_relative_state(target, managed_relatives)
+        files = desired_files(target, setup, profile, prestate)
         desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
         if current is None:
             changed = sorted(files)
@@ -2585,21 +3283,48 @@ def write_setup(
             changed = [
                 relative
                 for relative, data in files.items()
-                if current_managed_digest(target, relative)
+                if digest_from_relative_state(relative, prestate[relative])
                 != managed_digest_for_bytes(relative, data)
             ]
+        if current == desired_stamp and not changed:
+            return {
+                "setup_id": setup["id"],
+                "profile_id": profile["id"],
+                "changed": [],
+                "backup_slot": None,
+                "target": str(validate_target(target, create=False)),
+            }
         backup_slot = None
-        if current is not None and (
-            current["setup_id"] != setup["id"] or current["profile_id"] != profile["id"]
-        ):
-            backup_slot = create_backup(target, current)
-        snapshot = snapshot_files(target)
+        transaction = ObjectGraphTransaction(target, "setup write").begin()
         try:
+            if current is not None and (
+                current["setup_id"] != setup["id"] or current["profile_id"] != profile["id"]
+            ):
+                backup_slot = create_backup(target, current, transaction, prestate)
             for relative, data in files.items():
-                atomic_write(safe_target_path(target, relative), data, target)
-            atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
+                transaction.write_file(
+                    safe_target_path(target, relative),
+                    data,
+                    mode=OWNER_FILE_MODE,
+                    label=relative,
+                    expected_current=prestate[relative],
+                )
+            transaction.write_file(
+                stamp_path(target),
+                canonical_json(desired_stamp),
+                mode=OWNER_FILE_MODE,
+                label=STAMP_NAME,
+                expected_current=prestate[STAMP_NAME],
+            )
+            final_stamp = read_stamp(target)
+            if final_stamp != desired_stamp:
+                fail("setup write did not produce the intended stamp")
+            drift = drift_for_stamp(target, desired_stamp)
+            if drift:
+                fail(f"setup write did not produce intended managed files: {', '.join(drift)}")
+            transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            transaction.rollback()
             raise
         return {
             "setup_id": setup["id"],
@@ -2626,16 +3351,37 @@ def migrate_setup(
             fail(f"managed target has drift: {', '.join(drift)}")
         profile_id = legacy_profile_for_setup(current["setup_id"], requested_profile_id)
         profile = load_profile(profile_id)
-        backup_slot = create_backup(target, current)
-        files = desired_files(target, setup, profile)
+        managed_relatives = {*content_managed_paths(), *current["managed_files"], STAMP_NAME}
+        prestate = capture_relative_state(target, managed_relatives)
+        files = desired_files(target, setup, profile, prestate)
         desired_stamp = build_stamp(target, setup["id"], profile["id"], files)
-        snapshot = snapshot_files(target, extra_paths=sorted(current["managed_files"]))
+        transaction = ObjectGraphTransaction(target, "setup migration").begin()
         try:
+            backup_slot = create_backup(target, current, transaction, prestate)
             for relative, data in files.items():
-                atomic_write(safe_target_path(target, relative), data, target)
-            atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
+                transaction.write_file(
+                    safe_target_path(target, relative),
+                    data,
+                    mode=OWNER_FILE_MODE,
+                    label=relative,
+                    expected_current=prestate[relative],
+                )
+            transaction.write_file(
+                stamp_path(target),
+                canonical_json(desired_stamp),
+                mode=OWNER_FILE_MODE,
+                label=STAMP_NAME,
+                expected_current=prestate[STAMP_NAME],
+            )
+            final_stamp = read_stamp(target)
+            if final_stamp != desired_stamp:
+                fail("setup migration did not produce the intended stamp")
+            drift = drift_for_stamp(target, desired_stamp)
+            if drift:
+                fail(f"setup migration did not produce intended managed files: {', '.join(drift)}")
+            transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            transaction.rollback()
             raise
         return {
             "setup_id": setup["id"],
@@ -2658,15 +3404,23 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
             expected_mode=OWNER_FILE_MODE,
         )
         files, expected_stamp = validate_backup_envelope(target, slot, envelope)
-        snapshot = snapshot_files(target, extra_paths=sorted(files))
+        prestate = capture_relative_state(target, {*files, STAMP_NAME})
+        transaction = ObjectGraphTransaction(target, "backup restore").begin()
         try:
             for relative, data in sorted(files.items()):
                 path = safe_target_path(target, relative)
-                atomic_write(path, data, target)
-            prune_empty_managed_dirs(target)
+                transaction.write_file(
+                    path,
+                    data,
+                    mode=OWNER_FILE_MODE,
+                    label=relative,
+                    expected_current=prestate[relative],
+                )
+            transaction.prune_empty_managed_dirs()
             restored_stamp = validate_restored_state(target, expected_stamp)
+            transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            transaction.rollback()
             raise
         return {
             "setup_id": restored_stamp["setup_id"],
@@ -2690,20 +3444,29 @@ def remove_setup(target: Path) -> dict[str, Any]:
             fail(f"managed target has drift: {', '.join(drift)}")
         removed_setup_id = stamp["setup_id"]
         removed_profile_id = stamp.get("profile_id")
-        snapshot = snapshot_files(target, extra_paths=sorted(stamp["managed_files"]))
+        prestate = capture_relative_state(target, {*stamp["managed_files"], STAMP_NAME})
+        transaction = ObjectGraphTransaction(target, "setup removal").begin()
         try:
             for relative in sorted(stamp["managed_files"]):
-                path = safe_target_path(target, relative)
                 if relative in MERGED_MARKER_PATHS:
-                    remove_managed_block_from_target(target, relative)
+                    remove_managed_block_from_target(
+                        target, relative, transaction, prestate[relative]
+                    )
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-            with contextlib.suppress(FileNotFoundError):
-                stamp_path(target).unlink()
-            prune_empty_managed_dirs(target)
+                    transaction.remove_path(
+                        safe_target_path(target, relative),
+                        label=relative,
+                        expected_current=prestate[relative],
+                    )
+            transaction.remove_path(
+                stamp_path(target), label=STAMP_NAME, expected_current=prestate[STAMP_NAME]
+            )
+            transaction.prune_empty_managed_dirs()
+            if read_stamp(target) is not None:
+                fail("setup removal left a managed stamp")
+            transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            transaction.rollback()
             raise
         return {
             "removed_setup_id": removed_setup_id,
@@ -2713,9 +3476,15 @@ def remove_setup(target: Path) -> dict[str, Any]:
         }
 
 
-def remove_managed_block_from_target(target: Path, relative: str) -> None:
+def remove_managed_block_from_target(
+    target: Path,
+    relative: str,
+    transaction: ObjectGraphTransaction,
+    expected_current: dict[str, ObjectEntry],
+) -> None:
     path = safe_target_path(target, relative)
-    data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+    verify_object_tree(path, expected_current, relative, max_bytes=MANAGED_MAX_BYTES)
+    data = snapshot_data(expected_current)
     if data is None:
         return
     text = data.decode("utf-8")
@@ -2724,9 +3493,15 @@ def remove_managed_block_from_target(target: Path, relative: str) -> None:
         return
     updated = text.replace(block, "")
     if updated.strip():
-        atomic_write(path, updated.encode("utf-8"), target)
+        transaction.write_file(
+            path,
+            updated.encode("utf-8"),
+            mode=OWNER_FILE_MODE,
+            label=relative,
+            expected_current=expected_current,
+        )
     else:
-        path.unlink()
+        transaction.remove_path(path, label=relative, expected_current=expected_current)
 
 
 def prune_empty_managed_dirs(target: Path) -> None:
@@ -2970,25 +3745,64 @@ def software_file_mode_is(path: Path, mode: int) -> bool:
 
 
 def software_atomic_write(path: Path, data: bytes, target: Path, mode: int) -> None:
-    ensure_private_parent(path, target)
-    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    transaction = ObjectGraphTransaction(
+        target, f"software atomic write {path}", max_bytes=SOFTWARE_MAX_BYTES
+    ).begin()
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
+        transaction.write_file(path, data, mode=mode, label=str(path))
+        transaction.commit()
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+        transaction.rollback()
         raise
 
 
-def remove_empty_directory_if_created(path: Path, existed_before: bool) -> None:
+def write_new_file_exact(path: Path, data: bytes, *, mode: int, label: str, max_bytes: int) -> None:
+    if len(data) > max_bytes:
+        fail(f"{label} is too large")
+    if path.exists() or path.is_symlink():
+        fail(f"{label} already exists")
+    descriptor = -1
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, mode)
+        os.fchmod(descriptor, mode)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                fail(f"{label} write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        fsync_parent_directory(path, label)
+        final = snapshot_object_tree(path, label, max_bytes=max_bytes)
+        if final["."].data != data or final["."].mode != mode:
+            fail(f"{label} postcondition does not match intended state")
+    except BaseException:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+
+
+def remove_empty_directory_if_created(path: Path, existed_before: bool) -> bool:
     if existed_before:
-        return
-    with contextlib.suppress(FileNotFoundError, OSError):
+        return False
+    try:
         path.rmdir()
+        fsync_parent_directory(path, f"{path} removal")
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
 
 
 def read_official_installer_url(source: str, *, max_bytes: int) -> bytes:
@@ -3331,6 +4145,36 @@ def validate_safe_software_presence(target: Path) -> None:
                 fail(f"{label} must have mode {mode:04o}")
 
 
+def capture_software_state(target: Path) -> dict[str, dict[str, ObjectEntry]]:
+    return {
+        "container": snapshot_object_tree(
+            software_container(target), ".nddev-software", max_bytes=SOFTWARE_MAX_BYTES
+        ),
+        "root": snapshot_object_tree(
+            software_root(target), ".nddev-software/grok-build", max_bytes=SOFTWARE_MAX_BYTES
+        ),
+        "versions": snapshot_object_tree(
+            software_versions_dir(target),
+            ".nddev-software/grok-build/versions",
+            max_bytes=SOFTWARE_MAX_BYTES,
+        ),
+        "version": snapshot_object_tree(
+            software_version_dir(target),
+            f".nddev-software/grok-build/versions/{GROK_VERSION}",
+            max_bytes=SOFTWARE_MAX_BYTES,
+        ),
+        "bin": snapshot_object_tree(
+            managed_grok_path(target).parent, "bin", max_bytes=SOFTWARE_MAX_BYTES
+        ),
+        "binary": snapshot_object_tree(
+            managed_grok_path(target), "bin/grok", max_bytes=SOFTWARE_MAX_BYTES
+        ),
+        "stamp": snapshot_object_tree(
+            software_stamp_path(target), SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES
+        ),
+    }
+
+
 def run_vendor_installer(
     installer: bytes, installer_source: str, installer_sha256: str, target: Path
 ) -> dict[str, Any]:
@@ -3441,30 +4285,9 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     "managed_command": str(managed_grok_path(target).resolve(strict=False)),
                 }
             validate_safe_software_presence(target)
-            before_container_exists = (
-                software_container(target).exists() or software_container(target).is_symlink()
-            )
-            before_root_exists = (
-                software_root(target).exists() or software_root(target).is_symlink()
-            )
-            before_versions_exists = (
-                software_versions_dir(target).exists() or software_versions_dir(target).is_symlink()
-            )
-            before_version_exists = (
-                software_version_dir(target).exists() or software_version_dir(target).is_symlink()
-            )
-            before_bin_dir_exists = (
-                managed_grok_path(target).parent.exists()
-                or managed_grok_path(target).parent.is_symlink()
-            )
-            before_binary, before_binary_mode = snapshot_optional_software_file(
-                managed_grok_path(target), "bin/grok"
-            )
-            before_stamp, before_stamp_mode = snapshot_optional_software_file(
-                software_stamp_path(target), SOFTWARE_STAMP_NAME
-            )
             installer, installer_sha256, installer_source = read_pinned_installer()
             artifact = run_vendor_installer(installer, installer_source, installer_sha256, target)
+            software_prestate = capture_software_state(target)
             stamp_bytes = canonical_json(
                 software_stamp(
                     target,
@@ -3475,37 +4298,64 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                 )
             )
             staging: Path | None = None
-            rollback_parent: Path | None = None
-            rollback: Path | None = None
-            version_dir = software_version_dir(target)
+            transaction = ObjectGraphTransaction(
+                target, "Grok Build software install", max_bytes=SOFTWARE_MAX_BYTES
+            ).begin()
             try:
-                ensure_private_directory(software_container(target), ".nddev-software")
-                ensure_private_directory(software_root(target), ".nddev-software/grok-build")
-                ensure_private_directory(
-                    software_versions_dir(target), ".nddev-software/grok-build/versions"
+                transaction.make_directory(
+                    software_container(target),
+                    label=".nddev-software",
+                    expected_current=software_prestate["container"],
                 )
-                if before_version_exists:
-                    require_private_directory(
-                        version_dir, f".nddev-software/grok-build/versions/{GROK_VERSION}"
-                    )
-                staging = Path(
-                    tempfile.mkdtemp(prefix=".stage-", dir=str(software_versions_dir(target)))
+                transaction.make_directory(
+                    software_root(target),
+                    label=".nddev-software/grok-build",
+                    expected_current=software_prestate["root"],
                 )
-                rollback_parent = Path(
-                    tempfile.mkdtemp(prefix=".rollback-", dir=str(software_versions_dir(target)))
+                transaction.make_directory(
+                    software_versions_dir(target),
+                    label=".nddev-software/grok-build/versions",
+                    expected_current=software_prestate["versions"],
                 )
-                rollback = rollback_parent / GROK_VERSION
-                software_atomic_write(
-                    staging / GROK_COMMAND, artifact["binary"], target, OWNER_EXEC_MODE
+                transaction.make_directory(
+                    managed_grok_path(target).parent,
+                    label="bin",
+                    expected_current=software_prestate["bin"],
                 )
-                if before_version_exists:
-                    version_dir.rename(rollback)
-                staging.rename(version_dir)
-                software_atomic_write(
-                    managed_grok_path(target), artifact["binary"], target, OWNER_EXEC_MODE
+                staging = transaction.root / "software-stage"
+                if staging.exists() or staging.is_symlink():
+                    fail("Grok Build software staging directory already exists")
+                staging.mkdir(mode=OWNER_DIRECTORY_MODE)
+                staging.chmod(OWNER_DIRECTORY_MODE)
+                require_private_directory(staging, "Grok Build software staging directory")
+                fsync_parent_directory(staging, "Grok Build software staging directory")
+                write_new_file_exact(
+                    staging / GROK_COMMAND,
+                    artifact["binary"],
+                    mode=OWNER_EXEC_MODE,
+                    label="Grok Build staged binary",
+                    max_bytes=SOFTWARE_MAX_BYTES,
                 )
-                software_atomic_write(
-                    software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
+                transaction.publish_path(
+                    staging,
+                    software_version_dir(target),
+                    label=f".nddev-software/grok-build/versions/{GROK_VERSION}",
+                    expected_current=software_prestate["version"],
+                )
+                staging = None
+                transaction.write_file(
+                    managed_grok_path(target),
+                    artifact["binary"],
+                    mode=OWNER_EXEC_MODE,
+                    label="bin/grok",
+                    expected_current=software_prestate["binary"],
+                )
+                transaction.write_file(
+                    software_stamp_path(target),
+                    stamp_bytes,
+                    mode=OWNER_FILE_MODE,
+                    label=SOFTWARE_STAMP_NAME,
+                    expected_current=software_prestate["stamp"],
                 )
                 final_status = software_status_locked(target)
                 if not final_status["installed"]:
@@ -3514,54 +4364,22 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     )
                 if not final_status["current"]:
                     fail("Grok Build software install did not produce current pinned software")
+                transaction.commit()
             except BaseException:
-                if version_dir.exists() or version_dir.is_symlink():
-                    if version_dir.is_dir() and not version_dir.is_symlink():
-                        shutil.rmtree(version_dir)
-                    else:
-                        version_dir.unlink()
-                if rollback is not None and rollback.exists():
-                    rollback.rename(version_dir)
-                if before_binary is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        managed_grok_path(target).unlink()
-                else:
-                    software_atomic_write(
-                        managed_grok_path(target),
-                        before_binary,
-                        target,
-                        before_binary_mode or OWNER_EXEC_MODE,
-                    )
-                if before_stamp is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        software_stamp_path(target).unlink()
-                else:
-                    software_atomic_write(
-                        software_stamp_path(target),
-                        before_stamp,
-                        target,
-                        before_stamp_mode or OWNER_FILE_MODE,
-                    )
                 if staging is not None:
-                    with contextlib.suppress(FileNotFoundError):
-                        shutil.rmtree(staging)
-                if rollback_parent is not None:
-                    with contextlib.suppress(FileNotFoundError):
-                        shutil.rmtree(rollback_parent)
-                remove_empty_directory_if_created(
-                    managed_grok_path(target).parent, before_bin_dir_exists
-                )
-                remove_empty_directory_if_created(
-                    software_versions_dir(target), before_versions_exists
-                )
-                remove_empty_directory_if_created(software_root(target), before_root_exists)
-                remove_empty_directory_if_created(
-                    software_container(target), before_container_exists
-                )
+                    staging_entry = snapshot_object_tree(
+                        staging,
+                        "Grok Build software staging directory",
+                        max_bytes=SOFTWARE_MAX_BYTES,
+                    )
+                    remove_object_tree_exact(
+                        staging,
+                        staging_entry,
+                        "Grok Build software staging directory",
+                        max_bytes=SOFTWARE_MAX_BYTES,
+                    )
+                transaction.rollback()
                 raise
-            if rollback_parent is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    shutil.rmtree(rollback_parent)
             final_status = software_status_locked(target)
             return {
                 "schema_version": 1,

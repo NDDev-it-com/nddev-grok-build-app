@@ -578,6 +578,173 @@ def validate_restore_backup_smokes(manager: Any, target: Path, setup: dict[str, 
         raise ValueError("valid restore left managed drift")
 
 
+def assert_tree_unchanged(
+    before: tuple[tuple[str, dict[str, Any]], ...], path: Path, label: str
+) -> None:
+    after = snapshot_tree(path)
+    if after != before:
+        raise ValueError(f"{label} did not preserve the exact object graph")
+
+
+def validate_object_graph_transaction_smokes(manager: Any, tmp: Path) -> None:
+    setup = manager.load_setup(manager.DEFAULT_SETUP_ID)
+    full_auto = manager.load_profile(manager.DEFAULT_PROFILE_ID)
+    safe = manager.load_profile("safe")
+
+    target = tmp / "object-graph-home"
+    manager.write_setup(target, setup, full_auto)
+    config_snapshot = snapshot_path(target / "config.toml")
+    no_op = manager.write_setup(target, setup, full_auto)
+    if no_op["changed"] != []:
+        raise ValueError("same-content setup did not report an empty change set")
+    if snapshot_path(target / "config.toml") != config_snapshot:
+        raise ValueError("same-content setup rewrote config.toml object identity")
+
+    bad_target = tmp / "object-graph-type-home"
+    bad_target.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+    bad_target.chmod(manager.OWNER_DIRECTORY_MODE)
+    with manager.target_lock(bad_target, create=False):
+        pass
+    bad_config = bad_target / "config.toml"
+    bad_config.mkdir(mode=manager.OWNER_DIRECTORY_MODE)
+    bad_config.chmod(manager.OWNER_DIRECTORY_MODE)
+    before_bad = snapshot_tree(bad_target)
+    expect_manager_error(
+        manager,
+        lambda: manager.write_setup(bad_target, setup, full_auto),
+        "managed path must be a regular file",
+    )
+    assert_tree_unchanged(before_bad, bad_target, "managed type-replacement failure")
+
+    before_setup_failure = snapshot_tree(target)
+    original_write_file = manager.ObjectGraphTransaction.write_file
+
+    def fail_after_config(
+        self: Any,
+        path: Path,
+        data: bytes,
+        *,
+        mode: int,
+        label: str,
+        expected_current: Any = None,
+    ) -> None:
+        original_write_file(
+            self,
+            path,
+            data,
+            mode=mode,
+            label=label,
+            expected_current=expected_current,
+        )
+        if label == "config.toml":
+            raise manager.GrokBuildSetupError("injected setup graph failure")
+
+    manager.ObjectGraphTransaction.write_file = fail_after_config
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.write_setup(target, setup, safe, require_existing=True),
+            "injected setup graph failure",
+        )
+    finally:
+        manager.ObjectGraphTransaction.write_file = original_write_file
+    assert_tree_unchanged(before_setup_failure, target, "setup rollback")
+
+    before_backup_failure = snapshot_tree(target)
+
+    def fail_after_backup(
+        self: Any,
+        path: Path,
+        data: bytes,
+        *,
+        mode: int,
+        label: str,
+        expected_current: Any = None,
+    ) -> None:
+        original_write_file(
+            self,
+            path,
+            data,
+            mode=mode,
+            label=label,
+            expected_current=expected_current,
+        )
+        if label == manager.BACKUP_NAME:
+            raise manager.GrokBuildSetupError("injected backup graph failure")
+
+    manager.ObjectGraphTransaction.write_file = fail_after_backup
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.write_setup(target, setup, safe, require_existing=True),
+            "injected backup graph failure",
+        )
+    finally:
+        manager.ObjectGraphTransaction.write_file = original_write_file
+    assert_tree_unchanged(before_backup_failure, target, "backup rollback")
+
+    software_target = tmp / "object-graph-software-home"
+    manager.write_setup(software_target, setup, full_auto)
+    old_body = b"#!/bin/sh\nprintf old\\n\n"
+    drift_body = b"#!/bin/sh\nprintf drift\\n\n"
+    new_body = b"#!/bin/sh\nprintf new\\n\n"
+    install_stub_software(manager, software_target, old_body)
+    manager.managed_grok_path(software_target).write_bytes(drift_body)
+    manager.managed_grok_path(software_target).chmod(manager.OWNER_EXEC_MODE)
+    before_software_failure = snapshot_tree(software_target)
+    original_read_installer = manager.read_pinned_installer
+    original_run_installer = manager.run_vendor_installer
+
+    def fake_read_installer() -> tuple[bytes, str, str]:
+        return b"installer", manager.INSTALLER_SHA256, manager.INSTALLER_URL
+
+    def fake_run_installer(
+        installer: bytes, installer_source: str, installer_sha256: str, target_path: Path
+    ) -> dict[str, Any]:
+        return {
+            "binary": new_body,
+            "binary_sha256": hashlib.sha256(new_body).hexdigest(),
+            "installer_source": installer_source,
+            "installer_sha256": installer_sha256,
+            "version_output": f"grok {manager.GROK_VERSION}",
+        }
+
+    def fail_after_binary(
+        self: Any,
+        path: Path,
+        data: bytes,
+        *,
+        mode: int,
+        label: str,
+        expected_current: Any = None,
+    ) -> None:
+        original_write_file(
+            self,
+            path,
+            data,
+            mode=mode,
+            label=label,
+            expected_current=expected_current,
+        )
+        if label == "bin/grok":
+            raise manager.GrokBuildSetupError("injected software graph failure")
+
+    manager.read_pinned_installer = fake_read_installer
+    manager.run_vendor_installer = fake_run_installer
+    manager.ObjectGraphTransaction.write_file = fail_after_binary
+    try:
+        expect_manager_error(
+            manager,
+            lambda: manager.install_grok_software(software_target, "update-cli"),
+            "injected software graph failure",
+        )
+    finally:
+        manager.ObjectGraphTransaction.write_file = original_write_file
+        manager.read_pinned_installer = original_read_installer
+        manager.run_vendor_installer = original_run_installer
+    assert_tree_unchanged(before_software_failure, software_target, "software rollback")
+
+
 def expect_manager_main_error(manager: Any, argv: list[str], expected: str) -> None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -712,6 +879,7 @@ def snapshot_path(path: Path) -> dict[str, Any]:
         "dev": info.st_dev,
         "ino": info.st_ino,
         "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
         "sha256": digest,
         "link_target": link_target,
     }
@@ -1658,6 +1826,7 @@ def validate_adversarial_smokes(manager: Any) -> None:
         validate_bootstrap_different_target_handoff_smoke(manager, tmp)
         validate_bootstrap_binding_smokes(manager, target)
         validate_restore_backup_smokes(manager, target, setup)
+        validate_object_graph_transaction_smokes(manager, tmp)
 
         denied = (
             ["update"],

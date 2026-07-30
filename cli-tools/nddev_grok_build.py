@@ -232,10 +232,6 @@ VENDOR_INSTALLER_ASSET_BY_HOST_ID = {
     "ubuntu-glibc-arm64": "grok-0.2.114-linux-aarch64",
     "ubuntu-glibc-x64": "grok-0.2.114-linux-x86_64",
 }
-VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH = {
-    "aarch64": "grok-0.2.114-windows-aarch64.exe",
-    "x86_64": "grok-0.2.114-windows-x86_64.exe",
-}
 NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
     "macos-arm64": {
         "package": "@xai-official/grok-darwin-arm64",
@@ -280,18 +276,6 @@ NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
         "os": "linux",
         "cpu": "x64",
         "binary_member": "package/bin/grok.br",
-    },
-}
-NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS: dict[str, dict[str, Any]] = {
-    "@xai-official/grok-win32-x64": {
-        "integrity": "sha512-xrBENcmX2ChPmTOMiYod5nbVjkYcuPZ3/sFJ7OLUDHyjMYUME3NJUuN2sO8kBbYwGRvdiMO2D6AK6OJeUcmJow==",
-        "shasum": "b2e9df8e5ca0bd6e48783aafd4c904b411632109",
-        "unpacked_size": 40804870,
-    },
-    "@xai-official/grok-win32-arm64": {
-        "integrity": "sha512-LSQfzL3+engKov1WA/X3QLh7vxvftVFfZEe1twfkYs2iuTxyJ8rgd4JymYA0hP1SEX9RFryllNZSsHRkQqgF9A==",
-        "shasum": "fc45a94d5b627f89eab8489bbe1105172375a2a2",
-        "unpacked_size": 36877084,
     },
 }
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
@@ -3103,8 +3087,6 @@ def runtime_platform_result(
     vendor_installer_asset = (
         VENDOR_INSTALLER_ASSET_BY_HOST_ID.get(host_id) if host_id is not None else None
     )
-    if platform_id == "windows":
-        vendor_installer_asset = VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH.get(architecture)
     return RuntimePlatformInfo(
         system=system,
         platform_id=platform_id,
@@ -6370,12 +6352,9 @@ def load_package_json_member(files: dict[str, bytes], label: str) -> dict[str, A
 
 def validate_umbrella_npm_package(files: dict[str, bytes]) -> dict[str, Any]:
     package = load_package_json_member(files, "umbrella Grok Build npm package")
-    expected_optional = {
+    required_optional = {
         pin["package"]: GROK_VERSION for pin in NPM_NATIVE_PACKAGE_BY_HOST_ID.values()
     }
-    expected_optional.update(
-        {package_name: GROK_VERSION for package_name in NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS}
-    )
     if package.get("name") != GROK_NPM_PACKAGE or package.get("version") != GROK_VERSION:
         fail("umbrella Grok Build npm package identity mismatch")
     if package.get("bin") != {GROK_COMMAND: "bin/grok"}:
@@ -6384,7 +6363,18 @@ def validate_umbrella_npm_package(files: dict[str, bytes]) -> dict[str, Any]:
         fail("umbrella Grok Build npm package Node engine mismatch")
     if package.get("scripts") != {"postinstall": "node bin/postinstall.js"}:
         fail("umbrella Grok Build npm package script metadata mismatch")
-    if package.get("optionalDependencies") != expected_optional:
+    optional_dependencies = package.get("optionalDependencies")
+    if not isinstance(optional_dependencies, dict):
+        fail("umbrella Grok Build npm package optional dependency pins mismatch")
+    if any(
+        optional_dependencies.get(package_name) != version
+        for package_name, version in required_optional.items()
+    ):
+        fail("umbrella Grok Build npm package optional dependency pins mismatch")
+    if any(
+        not isinstance(package_name, str) or version != GROK_VERSION
+        for package_name, version in optional_dependencies.items()
+    ):
         fail("umbrella Grok Build npm package optional dependency pins mismatch")
     wrapper = files["package/bin/grok"]
     if not wrapper.startswith(b"#!/usr/bin/env node\n"):

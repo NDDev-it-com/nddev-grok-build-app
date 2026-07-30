@@ -1,6 +1,5 @@
 {
   "schema_version": 2,
-  "observed_at": "2026-07-29",
   "product": {
     "name": "Grok Build",
     "vendor": "xAI",
@@ -27,14 +26,7 @@
   "release": {
     "npm_package": "@xai-official/grok",
     "npm_version": "0.2.114",
-    "npm_dist_tags": {
-      "latest": "0.2.114",
-      "alpha": "0.2.114"
-    },
     "stable_channel_version": "0.2.114",
-    "alpha_channel_version": "0.2.114",
-    "enterprise_channel_version": "0.2.114",
-    "npm_published_at": "2026-07-24T22:22:44.621Z",
     "npm_integrity": "sha512-8eeyj6o0hQqzG5vr26CVixy1Fm3BkLhZzOnS7JXKVGuELpyw7N9MuVSs/xJyDUDdUYWhlsDnu+wMXWLiqj7XPg==",
     "npm_shasum": "1da7b276d788193af17d6d5ff78e871988d6426c",
     "npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.114.tgz",
@@ -347,40 +339,12 @@
     "upstream_ubuntu_version_floor": null,
     "upstream_glibc_floor": null,
     "nddev_unsupported_linux": "Linux distributions whose /etc/os-release or /usr/lib/os-release ID is not ubuntu are rejected before target resolution, target inspection, target creation, product coordination, target anchor, artifact fetch, artifact staging, or launch child execution.",
-    "official_installer_assets": {
-      "macos": [
-        "grok-0.2.114-macos-x86_64",
-        "grok-0.2.114-macos-aarch64"
-      ],
-      "linux": [
-        "grok-0.2.114-linux-x86_64",
-        "grok-0.2.114-linux-aarch64"
-      ],
-      "windows": [
-        "grok-0.2.114-windows-x86_64.exe",
-        "grok-0.2.114-windows-aarch64.exe"
-      ]
-    },
     "installer_asset_mapping": {
       "macos-arm64": "grok-0.2.114-macos-aarch64",
       "macos-x64": "grok-0.2.114-macos-x86_64",
       "ubuntu-glibc-arm64": "grok-0.2.114-linux-aarch64",
       "ubuntu-glibc-x64": "grok-0.2.114-linux-x86_64"
     },
-    "product_unsupported_vendor_observations": {
-      "windows": {
-        "product_supported": false,
-        "official_installer_assets": [
-          "grok-0.2.114-windows-x86_64.exe",
-          "grok-0.2.114-windows-aarch64.exe"
-        ],
-        "npm_optional_packages": [
-          "@xai-official/grok-win32-x64",
-          "@xai-official/grok-win32-arm64"
-        ]
-      }
-    },
-    "npm_package_distinction": "The npm package pin is @xai-official/grok; exact installer assets are grok-0.2.114-{macos,linux}-{x86_64,aarch64} plus product-unsupported grok-0.2.114-windows-{x86_64,aarch64}.exe observations, and these are not npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names.",
     "musl_baseline_variant": null,
     "baseline_variant": null,
     "upstream_linux_install_metadata_preserved": {
@@ -445,14 +409,6 @@
       },
       "module_installer_observation_only": true
     },
-    "npm_platform_package_ids_observed": [
-      "@xai-official/grok-darwin-x64",
-      "@xai-official/grok-darwin-arm64",
-      "@xai-official/grok-linux-x64",
-      "@xai-official/grok-linux-arm64",
-      "@xai-official/grok-win32-x64",
-      "@xai-official/grok-win32-arm64"
-    ],
     "npm_native_package_mapping": {
       "macos-arm64": {
         "package": "@xai-official/grok-darwin-arm64",

@@ -22,6 +22,21 @@ REQUIRED_WORKFLOWS = {
     "actionlint.yml", "codeql.yml", "dependency-review.yml", "release.yml",
     "scorecard.yml", "secret-scan.yml", "zizmor.yml",
 }
+FORBIDDEN_RAW_OBSERVATION_FIELDS = {
+    "observed_at",
+    "npm_dist_tags",
+    "npm_published_at",
+    "alpha_channel_version",
+    "enterprise_channel_version",
+    "official_installer_assets",
+    "product_unsupported_vendor_observations",
+    "npm_package_distinction",
+    "npm_platform_package_ids_observed",
+}
+FORBIDDEN_RAW_MANAGER_MARKERS = {
+    "NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS",
+    "VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -132,6 +147,17 @@ def validate_runtime_integrity(
     require(policy.get("scripts_disabled") is True, "package scripts must remain disabled")
     require(policy.get("umbrella_expected_members"), "umbrella layout missing")
     require(policy.get("native_expected_members"), "native layout missing")
+    for label, value in (
+        ("manifest", manifest),
+        ("contract", contract),
+        ("baseline", baseline),
+    ):
+        serialized = json.dumps(value, sort_keys=True)
+        for field in FORBIDDEN_RAW_OBSERVATION_FIELDS:
+            require(
+                f'"{field}"' not in serialized,
+                f"{label} contains raw observation field {field}",
+            )
 
 
 def validate_static_source() -> None:
@@ -143,6 +169,8 @@ def validate_static_source() -> None:
     for marker in ("NDDEV_GROK_BUILD_TEST", "BOOTSTRAP_ROOT_OVERRIDE", "TEST_INSTALLER",
                    "FAIL_AFTER"):
         require(marker not in source, f"public manager contains test marker {marker}")
+    for marker in FORBIDDEN_RAW_MANAGER_MARKERS:
+        require(marker not in source, f"public manager contains raw observation marker {marker}")
 
 
 def validate_release_surface() -> None:

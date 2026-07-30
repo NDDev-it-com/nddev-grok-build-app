@@ -234,20 +234,6 @@
       "non_ubuntu_rejection": "before target resolution, target inspection, target creation, product coordination, target anchor, artifact fetch, artifact staging, or launch child execution"
     },
     "vendor_platform_observations": {
-      "official_installer_assets": {
-        "macos": [
-          "grok-0.2.114-macos-x86_64",
-          "grok-0.2.114-macos-aarch64"
-        ],
-        "linux": [
-          "grok-0.2.114-linux-x86_64",
-          "grok-0.2.114-linux-aarch64"
-        ],
-        "windows": [
-          "grok-0.2.114-windows-x86_64.exe",
-          "grok-0.2.114-windows-aarch64.exe"
-        ]
-      },
       "installer_asset_mapping": {
         "macos-arm64": "grok-0.2.114-macos-aarch64",
         "macos-x64": "grok-0.2.114-macos-x86_64",
@@ -255,32 +241,10 @@
         "ubuntu-glibc-x64": "grok-0.2.114-linux-x86_64"
       },
       "npm_package": "@xai-official/grok",
-      "product_unsupported_vendor_observations": {
-        "windows": {
-          "product_supported": false,
-          "official_installer_assets": [
-            "grok-0.2.114-windows-x86_64.exe",
-            "grok-0.2.114-windows-aarch64.exe"
-          ],
-          "npm_optional_packages": [
-            "@xai-official/grok-win32-x64",
-            "@xai-official/grok-win32-arm64"
-          ]
-        }
-      },
-      "npm_package_distinction": "Installer asset names are not derived from npm @xai-official/grok-{darwin,linux,win32}-{x64,arm64} package names",
       "musl_baseline_variant": null,
       "baseline_variant": null,
       "upstream_ubuntu_version_floor": null,
       "upstream_glibc_floor": null,
-      "npm_platform_package_ids_observed": [
-        "@xai-official/grok-darwin-x64",
-        "@xai-official/grok-darwin-arm64",
-        "@xai-official/grok-linux-x64",
-        "@xai-official/grok-linux-arm64",
-        "@xai-official/grok-win32-x64",
-        "@xai-official/grok-win32-arm64"
-      ],
       "npm_native_package_mapping": {
         "macos-arm64": {
           "package": "@xai-official/grok-darwin-arm64",

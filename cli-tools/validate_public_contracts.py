@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import hashlib
 import json
 import re
 import stat
@@ -43,6 +44,10 @@ FORBIDDEN_RAW_MANAGER_MARKERS = {
     "NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS",
     "VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH",
 }
+GDS_ENTRIES = {"bundle.lock.yaml", "compiled-policy.json", "repository.yaml"}
+GDS_PROJECTIONS = (".claude/CLAUDE.md", ".gds/compiled-policy.json", "AGENTS.md")
+SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,6 +65,190 @@ def load_json(relative: str) -> dict[str, Any]:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def _regular_file(path: Path) -> bool:
+    mode = path.lstat().st_mode
+    return stat.S_ISREG(mode) and not stat.S_ISLNK(mode) and stat.S_IMODE(mode) in {0o644, 0o755}
+
+
+def validate_gds_contract() -> None:
+    gds = ROOT / ".gds"
+    require(
+        stat.S_ISDIR(gds.lstat().st_mode) and not stat.S_ISLNK(gds.lstat().st_mode),
+        ".gds must be a real directory",
+    )
+    require({item.name for item in gds.iterdir()} == GDS_ENTRIES, ".gds directory entries mismatch")
+    for name in GDS_ENTRIES:
+        require(_regular_file(gds / name), f".gds/{name} must be a tracked-style regular file")
+
+    repository = (gds / "repository.yaml").read_text(encoding="utf-8").splitlines()
+    agent_headers = [
+        line
+        for line in repository
+        if re.match(r"""^\s*(?:"agent"|'agent'|agent)\s*:\s*(?:#.*)?$""", line)
+    ]
+    require(
+        agent_headers == ["agent:"], "repository must contain exactly one canonical agent section"
+    )
+    agent_lookalikes = [
+        line
+        for line in repository
+        if re.match(r"""^(?:"agent[-_][^"]*"|'agent[-_][^']*'|agent[-_][^\s:]*)\s*:""", line)
+    ]
+    require(not agent_lookalikes, "repository contains an agent managed-key lookalike")
+    require(
+        sum(
+            re.match(r"""^\s*["']?generated_agents["']?\s*:""", line) is not None
+            for line in repository
+        )
+        == 1,
+        "generated_agents must occur exactly once globally",
+    )
+    generated_lookalikes = [
+        line
+        for line in repository
+        if re.match(
+            r"""^\s*["']?generated[-_]agents[^"'\s:]*["']?\s*:""", line
+        )
+    ]
+    require(
+        generated_lookalikes == ["  generated_agents: true"],
+        "generated_agents lookalike or noncanonical key",
+    )
+    agent_start = repository.index("agent:")
+    agent_end = next(
+        (
+            i
+            for i in range(agent_start + 1, len(repository))
+            if repository[i] and not repository[i].startswith(" ")
+        ),
+        len(repository),
+    )
+    generated = [
+        line.split(": ", 1)[1]
+        for line in repository[agent_start + 1 : agent_end]
+        if line.startswith("  generated_agents: ")
+    ]
+    require(generated == ["true"], "agent.generated_agents must occur exactly once and be true")
+
+    lines = (gds / "bundle.lock.yaml").read_text(encoding="utf-8").splitlines()
+    require(
+        lines[:3] == ["# GENERATED FILE - DO NOT EDIT DIRECTLY", "schema_version: 1", ""],
+        "bundle lock header/schema mismatch",
+    )
+    require(
+        sum(re.match(r"""^\s*["']?schema_version["']?\s*:""", line) is not None for line in lines)
+        == 1,
+        "duplicate schema_version",
+    )
+    top = [line[:-1] for line in lines if line and not line.startswith(" ") and line.endswith(":")]
+    require(top == ["bundle", "projection"], "bundle lock top-level sections mismatch")
+    bundle_start = lines.index("bundle:")
+    projection_start = lines.index("projection:")
+    require(bundle_start == 3, "unexpected content before bundle section")
+    bundle = lines[bundle_start + 1 : projection_start]
+    require(
+        sum(re.match(r"""^\s*["']?source_commit["']?\s*:""", line) is not None for line in lines)
+        == 1,
+        "source_commit must occur exactly once globally",
+    )
+    require(
+        sum(re.match(r"""^\s*["']?output_digest["']?\s*:""", line) is not None for line in lines)
+        == 1,
+        "output_digest must occur exactly once globally",
+    )
+    require(
+        sum(re.match(r"""^\s*["']?files["']?\s*:""", line) is not None for line in lines) == 1,
+        "files must occur exactly once globally",
+    )
+    require(
+        [line.split(":", 1)[0].strip() for line in bundle if line]
+        == ["version", "release_sequence", "channel", "source_commit", "digest"],
+        "bundle keys mismatch",
+    )
+    require(
+        all(
+            re.match(r"^  [a-z_]+: (?:\"[^\"]*\"|[0-9]+)$", line) is not None
+            for line in bundle
+            if line
+        ),
+        "bundle key serialization mismatch",
+    )
+    source_lines = [line for line in bundle if line.startswith("  source_commit: ")]
+    require(len(source_lines) == 1, "bundle.source_commit missing or duplicated")
+    source = json.loads(source_lines[0].split(": ", 1)[1])
+    require(
+        isinstance(source, str) and SOURCE_COMMIT.fullmatch(source) is not None,
+        "bundle.source_commit format mismatch",
+    )
+    files_index = lines.index("  files:", projection_start + 1)
+    projection_head = lines[projection_start + 1 : files_index]
+    require(
+        [line.split(":", 1)[0].strip() for line in projection_head if line]
+        == ["input_digest", "output_digest"],
+        "projection keys mismatch",
+    )
+    require(
+        all(
+            re.match(r"^  [a-z_]+: \"[^\"]*\"$", line) is not None
+            for line in projection_head
+            if line
+        ),
+        "projection key serialization mismatch",
+    )
+    output = json.loads(projection_head[1].split(": ", 1)[1])
+    require(
+        isinstance(output, str) and SHA256.fullmatch(output) is not None,
+        "projection.output_digest format mismatch",
+    )
+    entries: list[dict[str, str]] = []
+    tail = lines[files_index + 1 :]
+    require(len(tail) == 2 * len(GDS_PROJECTIONS), "projection.files shape mismatch")
+    for index in range(0, len(tail), 2):
+        require(
+            tail[index].startswith('    - path: "')
+            and tail[index + 1].startswith('      digest: "'),
+            "projection.files indentation/shape mismatch",
+        )
+        relative = json.loads(tail[index].split(": ", 1)[1])
+        digest = json.loads(tail[index + 1].split(": ", 1)[1])
+        require(
+            isinstance(relative, str)
+            and isinstance(digest, str)
+            and SHA256.fullmatch(digest) is not None,
+            "projection file entry invalid",
+        )
+        entries.append({"path": relative, "digest": digest})
+    require(
+        tuple(entry["path"] for entry in entries) == GDS_PROJECTIONS,
+        "projection paths/order mismatch",
+    )
+    encoded = json.dumps(
+        entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    require(
+        output == f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        "projection aggregate digest mismatch",
+    )
+    for entry in entries:
+        projection = ROOT / entry["path"]
+        require(
+            _regular_file(projection), f"managed projection is not a regular file: {entry['path']}"
+        )
+        require(
+            entry["digest"] == f"sha256:{hashlib.sha256(projection.read_bytes()).hexdigest()}",
+            f"managed projection digest mismatch: {entry['path']}",
+        )
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    def closure(name: str) -> set[str]:
+        match = re.search(rf"(?m)^\s+{name}: >-\n((?:\s{{8}}.+\n?)+)", workflow)
+        require(match is not None, f"release workflow missing {name}")
+        return set(match.group(1).split())
+
+    require(".gds" in closure("archive_paths"), "release archive_paths must include .gds")
+    require(".gds" not in closure("runtime_paths"), "release runtime_paths must exclude .gds")
 
 
 def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -259,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_marketplace((ROOT / "VERSION").read_text(encoding="utf-8").strip())
         validate_runtime_integrity(manifest, contract, baseline)
         validate_static_source()
+        validate_gds_contract()
         validate_release_surface()
     except Exception as exc:
         print(f"validate_public_contracts.py: FAIL: {exc}", file=sys.stderr)

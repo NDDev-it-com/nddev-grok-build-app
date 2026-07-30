@@ -70,12 +70,12 @@ SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 ROLLBACK_MAX_ATTEMPTS = 8
 READ_LIFECYCLE_MAX_ATTEMPTS = 4
 GROK_COMMAND = "grok"
-GROK_VERSION = "0.2.112"
+GROK_VERSION = "0.2.114"
 GROK_CHANNEL = "stable"
 GROK_NPM_PACKAGE = "@xai-official/grok"
-GROK_NPM_INTEGRITY = "sha512-dCXAiFHmn3JTOK+vPfCIzzum1GmxPB81NH73yYhqleXx1y/Ks3qjwJ+GeEXmB7eudiap98j9Nj1cDwH4lSuaOw=="
-GROK_NPM_SHASUM = "cd103bfeb3d102dff87788a9cbe8d36c293112c8"
-GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.112.tgz"
+GROK_NPM_INTEGRITY = "sha512-8eeyj6o0hQqzG5vr26CVixy1Fm3BkLhZzOnS7JXKVGuELpyw7N9MuVSs/xJyDUDdUYWhlsDnu+wMXWLiqj7XPg=="
+GROK_NPM_SHASUM = "1da7b276d788193af17d6d5ff78e871988d6426c"
+GROK_NPM_TARBALL = "https://registry.npmjs.org/@xai-official/grok/-/grok-0.2.114.tgz"
 GROK_NPM_TARBALL_MAX_BYTES = 1 * 1024 * 1024
 GROK_NPM_UNPACKED_SIZE = 17281
 GROK_NPM_FILE_COUNT = 4
@@ -227,22 +227,22 @@ HOST_ARCH_BY_MACHINE_ARCH = {
     "x86_64": "x64",
 }
 VENDOR_INSTALLER_ASSET_BY_HOST_ID = {
-    "macos-arm64": "grok-0.2.112-macos-aarch64",
-    "macos-x64": "grok-0.2.112-macos-x86_64",
-    "ubuntu-glibc-arm64": "grok-0.2.112-linux-aarch64",
-    "ubuntu-glibc-x64": "grok-0.2.112-linux-x86_64",
+    "macos-arm64": "grok-0.2.114-macos-aarch64",
+    "macos-x64": "grok-0.2.114-macos-x86_64",
+    "ubuntu-glibc-arm64": "grok-0.2.114-linux-aarch64",
+    "ubuntu-glibc-x64": "grok-0.2.114-linux-x86_64",
 }
 VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH = {
-    "aarch64": "grok-0.2.112-windows-aarch64.exe",
-    "x86_64": "grok-0.2.112-windows-x86_64.exe",
+    "aarch64": "grok-0.2.114-windows-aarch64.exe",
+    "x86_64": "grok-0.2.114-windows-x86_64.exe",
 }
 NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
     "macos-arm64": {
         "package": "@xai-official/grok-darwin-arm64",
-        "integrity": "sha512-VfKESr9UU+DN0X892+dMjFq56vQt6QwbjETtGkMztpby43tNFoZwXvVG2x1z79ko5/qq1aMZhdMJYGc8Mljkrg==",
-        "shasum": "436870a7708674ca1848e4682abc9babf1380791",
-        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.112.tgz",
-        "unpacked_size": 37113280,
+        "integrity": "sha512-ZTvkr+5vwQ7LomzBnWMflgLZB2qVmhdFEt6by4EIdEO4DYTa9VQ4HZftkgxDQkf3sF8NxgDSE3jVYViWjiNDew==",
+        "shasum": "0d9c102cdf5b4176af60f825dfcddb8821bfb12a",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-arm64/-/grok-darwin-arm64-0.2.114.tgz",
+        "unpacked_size": 37239049,
         "file_count": 4,
         "os": "darwin",
         "cpu": "arm64",
@@ -250,10 +250,10 @@ NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
     },
     "macos-x64": {
         "package": "@xai-official/grok-darwin-x64",
-        "integrity": "sha512-JP+iz9YUjmcXCwTwWqNwA9l70o4thBCpico3jeVyfP3PUT8iyKQs+xzkGB3oge1rJ79g/D+tzD3MTkPczaO5/g==",
-        "shasum": "a278cb13d030f3823851e3c0659746d666e5d3c8",
-        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.112.tgz",
-        "unpacked_size": 43142250,
+        "integrity": "sha512-tnExO3BY1ohk2G3CXQ76+HS2DCSoh37ZU4sk5tAYb/WlzX+zVTOIi4YwGalQZ4EfBrHl0rmucb8VTodfAz/RXQ==",
+        "shasum": "e38c7057dfe352a9504a5daec3ec430d02f82450",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-darwin-x64/-/grok-darwin-x64-0.2.114.tgz",
+        "unpacked_size": 43308066,
         "file_count": 4,
         "os": "darwin",
         "cpu": "x64",
@@ -261,10 +261,10 @@ NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
     },
     "ubuntu-glibc-arm64": {
         "package": "@xai-official/grok-linux-arm64",
-        "integrity": "sha512-KvPPcMBnyLDZuj+xfjkSdR5A/a3SAyGv5ElcBM+6bxLvefeH6s7NLoaeodwCIcezGkYTdvtKMovvEMx+h0LU2A==",
-        "shasum": "17f0853b04cae34e22d49e311db7eb9be1d2379e",
-        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.112.tgz",
-        "unpacked_size": 40192893,
+        "integrity": "sha512-GpiPA3tUfzIzjDW188Evz0iD1Qa7N25gV1DaHZOwfBqlm55wBjk1zs74pKiT06IfoHb/8qjigKlbzmGCrxhg4A==",
+        "shasum": "12ea5e19c1e4a1ab14a52c7e0abf11600b28d321",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-0.2.114.tgz",
+        "unpacked_size": 40301752,
         "file_count": 4,
         "os": "linux",
         "cpu": "arm64",
@@ -272,10 +272,10 @@ NPM_NATIVE_PACKAGE_BY_HOST_ID: dict[str, dict[str, Any]] = {
     },
     "ubuntu-glibc-x64": {
         "package": "@xai-official/grok-linux-x64",
-        "integrity": "sha512-2jD/00EB9xmzDQ89sSdA/CThTVqQQEgxIm/XqGIVuJXr63UST6H/aNdxPUiwz+tMkk8K12Nv6vPYHCO/H+Ae1Q==",
-        "shasum": "b14b442aeebc00b6a0c080e1a7e5470f054d5c4d",
-        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.112.tgz",
-        "unpacked_size": 45242318,
+        "integrity": "sha512-LjfqwRkFNplAwph9EMsLxAzbVPQewQp60rF+/l3x1EsTa43yW7zyVbZpPVWXXcev1TQ9K87qqmqhbUMU/E0Q3w==",
+        "shasum": "49cdcafd402fdd30948e9bfb466a8531f3a40384",
+        "tarball": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-0.2.114.tgz",
+        "unpacked_size": 45386913,
         "file_count": 4,
         "os": "linux",
         "cpu": "x64",

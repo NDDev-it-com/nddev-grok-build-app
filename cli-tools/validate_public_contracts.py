@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import hashlib
 import json
 import re
 import stat
@@ -41,6 +42,25 @@ FORBIDDEN_RAW_TREE_PATTERNS = (
     re.compile(r"@xai-official/grok-win32-(?:x64|arm64)"),
     re.compile(r"grok-\d+\.\d+\.\d+-windows-(?:x86_64|aarch64)\.exe"),
 )
+RAW_VALUE_CANDIDATE = re.compile(
+    r"@xai-official/[A-Za-z0-9._@/-]+"
+    r"|grok-[A-Za-z0-9._-]+\.exe"
+    r"|sha512-[A-Za-z0-9+/=]+"
+    r"|[0-9a-f]{40}"
+    r"|[0-9]{8}"
+)
+FORBIDDEN_RAW_VALUE_SHA256 = {
+    "02e18cb52a201ede6a3f068b219e1a515bc62ccb75161958085c0a61bbc6230b",
+    "0da7c10ba882a06d46b4afb1f216d63c1f4a7b55c6313d7736f2170a4fe5126c",
+    "4d63cb063422e9e0ae40cd6cec1d6251d85d188a804dd22c4d39fa97b6dad542",
+    "6bafade53522497c698637ebd5cec2723e667eb07e5b9248c73a6cac4855352f",
+    "ac2645f9af73de4cb423e392f408374d6aa5caf10d756029529847779c240bd6",
+    "b245564dcbf44344d1fa7a6d7c31787368273d518a7ec73aaf6074583ce46f67",
+    "b901a056eb14fb371092948f9feec2df0c204d0b8dfc85949d098c793b9c6444",
+    "c9f45e26071758dfd8105ee992afda6ccf9bb5f62c751434148961cd3cd3b77a",
+    "ce336810960bf5fbcf2854822252dacfb09f13828c0798e0d09cb3a2c4188143",
+    "d6606fa6792201751a660d4e05ca60b7c24a4e1e7547f5e2b27e737f5a736286",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -220,6 +240,12 @@ def validate_no_raw_observations() -> None:
             require(
                 pattern.search(source) is None,
                 f"{path.relative_to(ROOT)} contains raw unsupported vendor observation",
+            )
+        for candidate in RAW_VALUE_CANDIDATE.findall(source):
+            digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+            require(
+                digest not in FORBIDDEN_RAW_VALUE_SHA256,
+                f"{path.relative_to(ROOT)} contains raw unsupported vendor value",
             )
 
 

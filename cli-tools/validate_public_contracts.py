@@ -19,8 +19,13 @@ SETUPS = ["nddev-builder"]
 PROFILES = ["full-auto", "safe"]
 SUPPORTED = ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"]
 REQUIRED_WORKFLOWS = {
-    "actionlint.yml", "codeql.yml", "dependency-review.yml", "release.yml",
-    "scorecard.yml", "secret-scan.yml", "zizmor.yml",
+    "actionlint.yml",
+    "codeql.yml",
+    "dependency-review.yml",
+    "release.yml",
+    "scorecard.yml",
+    "secret-scan.yml",
+    "zizmor.yml",
 }
 FORBIDDEN_RAW_OBSERVATION_FIELDS = {
     "observed_at",
@@ -88,14 +93,18 @@ def validate_catalog(manifest: dict[str, Any], contract: dict[str, Any]) -> None
     require(isinstance(native, dict), "native marketplace projection missing")
     for key in ("source_path", "plugin_source_path"):
         relative = native.get(key)
-        require(isinstance(relative, str) and (ROOT / relative).exists(),
-                f"missing native marketplace source {key}")
+        require(
+            isinstance(relative, str) and (ROOT / relative).exists(),
+            f"missing native marketplace source {key}",
+        )
     for profile_id in PROFILES:
         profile = load_json(f"profiles/{profile_id}/profile.json")
         require(profile.get("id") == profile_id, f"profile id mismatch: {profile_id}")
     managed = manifest.get("managed_files")
-    require(isinstance(managed, list) and len(managed) == len(set(managed)),
-            "managed projection invalid")
+    require(
+        isinstance(managed, list) and len(managed) == len(set(managed)),
+        "managed projection invalid",
+    )
     require(contract["managed_state"]["stamp_file"] in managed, "managed stamp missing")
 
 
@@ -107,16 +116,20 @@ def validate_marketplace(version: str) -> None:
     require(isinstance(entries, list) and len(entries) == 1, "marketplace entry invalid")
     require(entries[0].get("name") == "nddev-builder", "marketplace plugin id mismatch")
     require(entries[0].get("version") == version, "marketplace plugin version mismatch")
-    require(entries[0].get("source") == {"type": "local", "path": "../plugins/nddev-builder"},
-            "marketplace local source mismatch")
+    require(
+        entries[0].get("source") == {"type": "local", "path": "../plugins/nddev-builder"},
+        "marketplace local source mismatch",
+    )
     require(plugin.get("name") == "nddev-builder", "plugin name mismatch")
     require(plugin.get("version") == version, "plugin version mismatch")
     components = index.get("plugins", {}).get("nddev-builder", {}).get("components", {})
     skills = components.get("skills")
     require(isinstance(skills, list) and skills, "plugin index skills missing")
     skill_root = ROOT / "builder/nddev-builder/plugins/nddev-builder/skills"
-    require({item["name"] for item in skills} == {path.name for path in skill_root.iterdir()},
-            "plugin index skill projection mismatch")
+    require(
+        {item["name"] for item in skills} == {path.name for path in skill_root.iterdir()},
+        "plugin index skill projection mismatch",
+    )
 
 
 def validate_runtime_integrity(
@@ -125,20 +138,35 @@ def validate_runtime_integrity(
     lifecycle = contract["software_lifecycle"]
     manifest_lifecycle = manifest["software_lifecycle"]
     for key in (
-        "version", "channel", "install_mechanism", "npm_package", "npm_integrity",
-        "npm_shasum", "npm_tarball", "native_npm_packages", "archive_policy",
+        "version",
+        "channel",
+        "install_mechanism",
+        "npm_package",
+        "npm_integrity",
+        "npm_shasum",
+        "npm_tarball",
+        "native_npm_packages",
+        "archive_policy",
     ):
         require(lifecycle[key] == manifest_lifecycle[key], f"software lifecycle {key} mismatch")
-    require(lifecycle["native_npm_packages"] == baseline["release"]["native_npm_package_mapping"],
-            "native npm package ledger mismatch")
-    require(set(lifecycle["native_npm_packages"]) == set(SUPPORTED),
-            "native package host scope mismatch")
+    require(
+        lifecycle["native_npm_packages"] == baseline["release"]["native_npm_package_mapping"],
+        "native npm package ledger mismatch",
+    )
+    require(
+        set(lifecycle["native_npm_packages"]) == set(SUPPORTED),
+        "native package host scope mismatch",
+    )
     for host, package in lifecycle["native_npm_packages"].items():
-        require(host in SUPPORTED and package.get("product_supported") is True,
-                f"unsupported native package {host}")
+        require(
+            host in SUPPORTED and package.get("product_supported") is True,
+            f"unsupported native package {host}",
+        )
         integrity = package.get("integrity")
-        require(isinstance(integrity, str) and integrity.startswith("sha512-"),
-                f"invalid integrity for {host}")
+        require(
+            isinstance(integrity, str) and integrity.startswith("sha512-"),
+            f"invalid integrity for {host}",
+        )
         base64.b64decode(integrity[7:], validate=True)
         shasum = package.get("shasum")
         require(isinstance(shasum, str) and len(shasum) == 40, f"invalid shasum for {host}")
@@ -180,8 +208,12 @@ def validate_static_source() -> None:
     tree = ast.parse(source, filename=str(path))
     functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     require({"parse_args", "main"} <= functions, "manager parse_args/main missing")
-    for marker in ("NDDEV_GROK_BUILD_TEST", "BOOTSTRAP_ROOT_OVERRIDE", "TEST_INSTALLER",
-                   "FAIL_AFTER"):
+    for marker in (
+        "NDDEV_GROK_BUILD_TEST",
+        "BOOTSTRAP_ROOT_OVERRIDE",
+        "TEST_INSTALLER",
+        "FAIL_AFTER",
+    ):
         require(marker not in source, f"public manager contains test marker {marker}")
     for marker in FORBIDDEN_RAW_MANAGER_MARKERS:
         require(marker not in source, f"public manager contains raw observation marker {marker}")
@@ -192,15 +224,29 @@ def validate_release_surface() -> None:
     require(stat.S_ISREG(agents.lstat().st_mode), "AGENTS.md must be a regular file")
     for name in REQUIRED_WORKFLOWS:
         require((ROOT / ".github/workflows" / name).is_file(), f"missing workflow {name}")
-    for relative in ("AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "VERSION",
-                     "build", "builder", "cli-tools", "config", "docs", "profiles",
-                     "references", "setups"):
+    for relative in (
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+        "VERSION",
+        "build",
+        "builder",
+        "cli-tools",
+        "config",
+        "docs",
+        "profiles",
+        "references",
+        "setups",
+    ):
         require((ROOT / relative).exists(), f"missing release path {relative}")
     bridge_root = ROOT / ".claude"
     bridge = bridge_root / "CLAUDE.md"
     require(stat.S_ISDIR(bridge_root.lstat().st_mode), "Claude bridge root must be a directory")
-    require(sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
-            "Claude bridge directory must contain only CLAUDE.md")
+    require(
+        sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
+        "Claude bridge directory must contain only CLAUDE.md",
+    )
     require(stat.S_ISREG(bridge.lstat().st_mode), "Claude bridge must be a regular file")
     require(bridge.read_bytes() == b"@../AGENTS.md\n", "Claude bridge mismatch")
 

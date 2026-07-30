@@ -98,20 +98,6 @@
         "cpu": "x64",
         "binary_member": "package/bin/grok.br",
         "product_supported": true
-      },
-      "@xai-official/grok-win32-x64": {
-        "version": "0.2.114",
-        "integrity": "sha512-xrBENcmX2ChPmTOMiYod5nbVjkYcuPZ3/sFJ7OLUDHyjMYUME3NJUuN2sO8kBbYwGRvdiMO2D6AK6OJeUcmJow==",
-        "shasum": "b2e9df8e5ca0bd6e48783aafd4c904b411632109",
-        "unpacked_size": 40804870,
-        "product_supported": false
-      },
-      "@xai-official/grok-win32-arm64": {
-        "version": "0.2.114",
-        "integrity": "sha512-LSQfzL3+engKov1WA/X3QLh7vxvftVFfZEe1twfkYs2iuTxyJ8rgd4JymYA0hP1SEX9RFryllNZSsHRkQqgF9A==",
-        "shasum": "fc45a94d5b627f89eab8489bbe1105172375a2a2",
-        "unpacked_size": 36877084,
-        "product_supported": false
       }
     },
     "native_npm_package_mapping": {

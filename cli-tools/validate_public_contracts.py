@@ -37,6 +37,10 @@ FORBIDDEN_RAW_MANAGER_MARKERS = {
     "NPM_UNSUPPORTED_NATIVE_PACKAGE_OBSERVATIONS",
     "VENDOR_UNSUPPORTED_WINDOWS_ASSET_BY_ARCH",
 }
+FORBIDDEN_RAW_TREE_PATTERNS = (
+    re.compile(r"@xai-official/grok-win32-(?:x64|arm64)"),
+    re.compile(r"grok-\d+\.\d+\.\d+-windows-(?:x86_64|aarch64)\.exe"),
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -147,6 +151,19 @@ def validate_runtime_integrity(
     require(policy.get("scripts_disabled") is True, "package scripts must remain disabled")
     require(policy.get("umbrella_expected_members"), "umbrella layout missing")
     require(policy.get("native_expected_members"), "native layout missing")
+    observed_packages = baseline["release"].get("native_npm_packages")
+    require(isinstance(observed_packages, dict), "native npm package catalog missing")
+    supported_packages = {
+        package["package"] for package in lifecycle["native_npm_packages"].values()
+    }
+    require(
+        set(observed_packages) == supported_packages,
+        "native npm package catalog must contain only supported packages",
+    )
+    require(
+        all(package.get("product_supported") is True for package in observed_packages.values()),
+        "native npm package catalog contains unsupported records",
+    )
     for label, value in (
         ("manifest", manifest),
         ("contract", contract),
@@ -191,6 +208,21 @@ def validate_release_surface() -> None:
     require(bridge.read_bytes() == b"@../AGENTS.md\n", "Claude bridge mismatch")
 
 
+def validate_no_raw_observations() -> None:
+    for path in ROOT.rglob("*"):
+        if ".git" in path.parts or not path.is_file():
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for pattern in FORBIDDEN_RAW_TREE_PATTERNS:
+            require(
+                pattern.search(source) is None,
+                f"{path.relative_to(ROOT)} contains raw unsupported vendor observation",
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
     parse_args(argv)
     try:
@@ -200,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_runtime_integrity(manifest, contract, baseline)
         validate_static_source()
         validate_release_surface()
+        validate_no_raw_observations()
     except Exception as exc:
         print(f"validate_public_contracts.py: FAIL: {exc}", file=sys.stderr)
         return 1

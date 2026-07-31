@@ -108,9 +108,7 @@ def validate_gds_contract() -> None:
     generated_lookalikes = [
         line
         for line in repository
-        if re.match(
-            r"""^\s*["']?generated[-_]agents[^"'\s:]*["']?\s*:""", line
-        )
+        if re.match(r"""^\s*["']?generated[-_]agents[^"'\s:]*["']?\s*:""", line)
     ]
     require(
         generated_lookalikes == ["  generated_agents: true"],

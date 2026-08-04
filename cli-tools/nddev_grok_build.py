@@ -86,12 +86,22 @@ NODE_CANDIDATE_PATHS = (
     Path("/usr/local/bin/node"),
     Path("/usr/bin/node"),
     Path("/bin/node"),
+    Path.home() / ".local" / "bin" / "node",
 )
 INSTALLER_URL = "https://x.ai/cli/install.sh"
 INSTALLER_SHA256 = "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952"
 INSTALLER_TIMEOUT_SECONDS = 120.0
 VERSION_PROBE_TIMEOUT_SECONDS = 15.0
-SAFE_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+SAFE_SYSTEM_PATH = os.pathsep.join(
+    (
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/opt/homebrew/bin",
+        str(Path.home() / ".local" / "bin"),
+    )
+)
 PROVIDER_SECRET_NAMES = {
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",

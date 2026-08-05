@@ -238,10 +238,10 @@ def validate_gds_contract() -> None:
             entry["digest"] == f"sha256:{hashlib.sha256(projection.read_bytes()).hexdigest()}",
             f"managed projection digest mismatch: {entry['path']}",
         )
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = (ROOT / "release/package.yml").read_text(encoding="utf-8")
 
     def closure(name: str) -> set[str]:
-        match = re.search(rf"(?m)^\s+{name}: >-\n((?:\s{{8}}.+\n?)+)", workflow)
+        match = re.search(rf"(?m)^{name}: >-\n((?:  .+\n?)+)", workflow)
         require(match is not None, f"release workflow missing {name}")
         return set(match.group(1).split())
 
@@ -409,8 +409,7 @@ def validate_static_source() -> None:
 def validate_release_surface() -> None:
     agents = ROOT / "AGENTS.md"
     require(stat.S_ISREG(agents.lstat().st_mode), "AGENTS.md must be a regular file")
-    for name in REQUIRED_WORKFLOWS:
-        require((ROOT / ".github/workflows" / name).is_file(), f"missing workflow {name}")
+    require((ROOT / "release/package.yml").is_file(), "missing release package manifest")
     for relative in (
         "AGENTS.md",
         "CHANGELOG.md",

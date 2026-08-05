@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1] - 2026-08-05
+
+### Changed
+
+- Updated the supported stable Grok Build runtime to 0.2.118 and refreshed
+  exact npm integrity, shasum, tarball, and unpacked-size identities for the
+  umbrella package and all four supported native packages.
+
 ## [0.2.0] - 2026-07-27
 
 ### Changed

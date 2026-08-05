@@ -1,6 +1,6 @@
 {
   "name": "nddev-builder",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "NDDev builder capability for creating and checking Grok Build-native skills, agents, hooks, MCP configuration, marketplaces, and plugin bundles.",
   "author": {
     "name": "NDDev"

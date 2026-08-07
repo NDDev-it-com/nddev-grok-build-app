@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "nddev-builder",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Build and review Grok Build-native builder artifacts.",
       "category": "development",
       "source": {

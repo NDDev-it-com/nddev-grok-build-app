@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2] - 2026-08-08
+
+### Changed
+
+- Updated the supported stable Grok Build runtime from 0.2.118 to 1.0.0 and
+  refreshed the exact umbrella and four supported native npm identities.
+- Revalidated the unchanged wrapper scripts, four-member archive layouts,
+  `bin/grok.br` native payload, Node 20 floor, command/flag inventory, native
+  plugin discovery, all ten builder skills, and managed config format.
+- Recorded the 1.0 sandbox/path-normalization hardening and clarified remote
+  `--restore-code`/`--worktree` semantics; the removed
+  `project_picker_disabled` hint is not emitted by this setup.
+
 ## [0.2.1] - 2026-08-05
 
 ### Changed

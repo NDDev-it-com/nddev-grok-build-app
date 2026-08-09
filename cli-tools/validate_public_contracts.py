@@ -483,6 +483,7 @@ def validate_provider_protocol(manifest: dict[str, Any], contract: dict[str, Any
         "validate-bundle",
         "plan-operation",
         "apply-operation",
+        "recover-operation",
         "status",
     ]
     expected_operations = ["backup", "install", "remove", "replace", "restore"]

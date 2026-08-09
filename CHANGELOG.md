@@ -8,6 +8,8 @@
 - Persist exact setup, component, bundle, provider-release, plan, target, and
   native-projection identities without changing the existing Grok-native
   setup/profile, software, or launch lifecycle.
+- Add durable crash recovery and validate Grok-native TOML/JSON, skill trees,
+  plugin manifests, and projection kinds before creating an operation plan.
 
 ## [0.2.2] - 2026-08-08
 

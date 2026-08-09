@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "build_version": "0.2.2",
+  "build_version": "0.3.0",
   "grok_build_tested": "1.0.0",
   "grok_build_channel": "stable",
   "grok_build_npm_package": "@xai-official/grok",
@@ -9,7 +9,7 @@
   "grok_build_npm_tarball": "https://registry.npmjs.org/@xai-official/grok/-/grok-1.0.0.tgz",
   "grok_build_installer": "https://x.ai/cli/install.sh",
   "grok_build_installer_sha256": "0465d810453bbf18608ccae310fa79f4c59ae4a0538bd8a3a374ebce749be952",
-  "nddev_builder_plugin_version": "0.2.2",
+  "nddev_builder_plugin_version": "0.3.0",
   "python_requires": ">=3.9",
   "runtime_baseline_ref": "references/grok-build-baseline.json",
   "grok_build_install_mechanism": "verified-npm-tarball",

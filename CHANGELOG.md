@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0] - 2026-08-09
+
+- Added the capability-negotiated public provider protocol v3 for deterministic
+  HarnessBundle validation, pure planning, exact-digest application, status,
+  backup, restore, and ownership-scoped removal.
+- Persist exact setup, component, bundle, provider-release, plan, target, and
+  native-projection identities without changing the existing Grok-native
+  setup/profile, software, or launch lifecycle.
+
 ## [0.2.2] - 2026-08-08
 
 ### Changed

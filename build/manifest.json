@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "nddev-grok-build-app",
-  "build_version": "0.2.2",
+  "build_version": "0.3.0",
   "entrypoint": "python3 cli-tools/nddev_grok_build.py",
   "source_root": "setups",
   "profile_root": "profiles",
@@ -373,7 +373,7 @@
   },
   "nddev_builder": {
     "source": "builder/nddev-builder",
-    "version": "0.2.2",
+    "version": "0.3.0",
     "native_surfaces": [
       "$GROK_HOME/skills/nddev-builder/SKILL.md",
       "$GROK_HOME/agents/nddev-builder.md",
@@ -485,6 +485,16 @@
     "launch_image_file_mode": "0500",
     "runtime_home_tmp_xdg_writable_while_locked": true,
     "same_uid_malicious_mutation_boundary": "cooperative same user manager operations are serialized; direct malicious same user mutation of the target or bootstrap root, especially under sandbox off, is outside the cross-user isolation boundary"
+  },
+  "provider_protocol": {
+    "version": 3,
+    "bundle_format": "ai-stp-bundle/1",
+    "commands": ["provider-info", "validate-bundle", "plan-operation", "apply-operation", "status"],
+    "operations": ["backup", "install", "remove", "replace", "restore"],
+    "permission_profiles": ["safe", "full-auto"],
+    "component_kinds": ["agent", "command", "hook", "instruction", "mcp", "plugin", "setting", "skill"],
+    "native_namespaces": [".mcp.json", "AGENTS.md", "agents", "commands", "config.toml", "hooks", "plugins", "skills"],
+    "state_file": "NDDEV-GROK-BUILD-PROVIDER.json"
   },
   "runtime_compatibility": {
     "baseline_ref": "references/grok-build-baseline.json",

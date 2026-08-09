@@ -447,6 +447,18 @@
     "external_marketplace_published": null,
     "binary_delivery": false
   },
+  "provider_protocol": {
+    "version": 3,
+    "bundle_format": "ai-stp-bundle/1",
+    "commands": ["provider-info", "validate-bundle", "plan-operation", "apply-operation", "status"],
+    "operations": ["backup", "install", "remove", "replace", "restore"],
+    "permission_profiles": ["safe", "full-auto"],
+    "component_kinds": ["agent", "command", "hook", "instruction", "mcp", "plugin", "setting", "skill"],
+    "native_namespaces": [".mcp.json", "AGENTS.md", "agents", "commands", "config.toml", "hooks", "plugins", "skills"],
+    "state_file": "NDDEV-GROK-BUILD-PROVIDER.json",
+    "exact_provenance": ["setup_passport_digest", "component_refs", "bundle_digest", "artifact_digest", "provider_release_digest", "plan_digest", "target_identity_digest", "native_ownership"],
+    "optional_standalone_lifecycle": ["software-status", "install-cli", "update-cli", "remove-cli", "launch"]
+  },
   "runtime_compatibility": {
     "baseline_ref": "references/grok-build-baseline.json",
     "version_ref": "build/version.json",

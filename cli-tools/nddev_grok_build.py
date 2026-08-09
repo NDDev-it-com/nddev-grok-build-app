@@ -27,6 +27,14 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, NoReturn
 
+sys.dont_write_bytecode = True
+CLI_TOOLS_ROOT = Path(__file__).resolve().parent
+if str(CLI_TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(CLI_TOOLS_ROOT))
+
+import provider_protocol_v3 as provider_wire_v3  # noqa: E402
+import provider_runtime_v3  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-grok-build-app"
@@ -43,6 +51,8 @@ BACKUP_NAME = "NDDEV-GROK-BUILD-BACKUP.json"
 SOFTWARE_STAMP_NAME = "NDDEV-GROK-BUILD-SOFTWARE.json"
 CONTROL_DIR_NAME = ".nddev-grok-build"
 ROLLBACK_INTENT_NAME = "NDDEV-GROK-BUILD-ROLLBACK.json"
+PROVIDER_STATE_NAME = "NDDEV-GROK-BUILD-PROVIDER.json"
+PROVIDER_BACKUP_DIRECTORY = ".nddev-grok-build-provider-backups"
 STAMP_SCHEMA_VERSION = 2
 LEGACY_STAMP_SCHEMA_VERSION = 1
 SOFTWARE_STAMP_SCHEMA_VERSION = 2
@@ -69,6 +79,41 @@ CLEANUP_JOURNAL_MAX_BYTES = 32 * 1024 * 1024
 SOFTWARE_MAX_BYTES = 256 * 1024 * 1024
 ROLLBACK_MAX_ATTEMPTS = 8
 READ_LIFECYCLE_MAX_ATTEMPTS = 4
+PROVIDER_V3 = provider_runtime_v3.Runtime(
+    provider_runtime_v3.Config(
+        root=ROOT,
+        provider_id=PRODUCT_NAME,
+        harness_id="grok-build",
+        provider_version=VERSION,
+        state_name=PROVIDER_STATE_NAME,
+        backup_directory=PROVIDER_BACKUP_DIRECTORY,
+        component_kinds=frozenset(
+            {
+                "instruction",
+                "skill",
+                "mcp",
+                "hook",
+                "command",
+                "agent",
+                "plugin",
+                "setting",
+            }
+        ),
+        native_namespaces=frozenset(
+            {
+                "AGENTS.md",
+                "config.toml",
+                ".mcp.json",
+                "skills",
+                "agents",
+                "commands",
+                "hooks",
+                "plugins",
+            }
+        ),
+        permission_profiles=("safe", "full-auto"),
+    )
+)
 GROK_COMMAND = "grok"
 GROK_VERSION = "1.0.0"
 GROK_CHANNEL = "stable"
@@ -1035,7 +1080,10 @@ def publish_product_anchor_if_missing(product_root: Path) -> bool:
     )
     if created:
         require_existing_managed_file(
-            path, "product lock", max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
+            path,
+            "product lock",
+            max_bytes=METADATA_MAX_BYTES,
+            expected_mode=OWNER_FILE_MODE,
         )
     return created
 
@@ -1093,7 +1141,9 @@ def restore_directory_mtime(path: Path, mtime_ns: int, label: str) -> None:
         fsync_directory(path, f"{label} mtime restore")
 
 
-def ensure_product_root_for_publication(system_root: Path) -> tuple[Path, bool, int | None, int]:
+def ensure_product_root_for_publication(
+    system_root: Path,
+) -> tuple[Path, bool, int | None, int]:
     system_info = require_real_directory(system_root, "system bootstrap root")
     system_root_mtime_ns = int(system_info.st_mtime_ns)
     product_root = bootstrap_product_root_path(system_root)
@@ -1107,7 +1157,12 @@ def ensure_product_root_for_publication(system_root: Path) -> tuple[Path, bool, 
         product_root.chmod(OWNER_DIRECTORY_MODE)
         require_private_directory(product_root, "product lock root")
         fsync_directory(system_root, "product lock root creation")
-    return product_root, product_root_preexisting, product_root_mtime_ns, system_root_mtime_ns
+    return (
+        product_root,
+        product_root_preexisting,
+        product_root_mtime_ns,
+        system_root_mtime_ns,
+    )
 
 
 def restore_unpublished_product_root(
@@ -1581,7 +1636,10 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
         require_private_directory(backup_pool(target), "backup pool")
         require_private_directory(internal.parent, "backup slot")
         require_existing_managed_file(
-            internal, BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
+            internal,
+            BACKUP_NAME,
+            max_bytes=METADATA_MAX_BYTES,
+            expected_mode=OWNER_FILE_MODE,
         )
         return internal
     legacy = legacy_backup_pool(target) / str(slot) / BACKUP_NAME
@@ -1589,7 +1647,10 @@ def backup_envelope_path(target: Path, slot: int) -> Path:
         require_private_directory(legacy_backup_pool(target), "legacy backup pool")
         require_private_directory(legacy.parent, "legacy backup slot")
         require_existing_managed_file(
-            legacy, BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, expected_mode=OWNER_FILE_MODE
+            legacy,
+            BACKUP_NAME,
+            max_bytes=METADATA_MAX_BYTES,
+            expected_mode=OWNER_FILE_MODE,
         )
         return legacy
     return internal
@@ -2531,7 +2592,8 @@ def write_rollback_intent(
     target_entry: TreeEntry,
 ) -> None:
     ordered = sorted(
-        entries.values(), key=lambda item: target_relative_path(target, item.path, item.label)
+        entries.values(),
+        key=lambda item: target_relative_path(target, item.path, item.label),
     )
     payload = {
         "schema_version": ROLLBACK_INTENT_SCHEMA_VERSION,
@@ -2630,7 +2692,14 @@ def preserve_file_for_rollback(
     if backup_path.exists() or backup_path.is_symlink():
         fail(f"{label} rollback object already exists")
     entry = PreservedFile(
-        target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
+        target,
+        path,
+        label,
+        max_bytes,
+        snapshot,
+        stage_root,
+        parent_mtime_ns,
+        backup_path,
     )
     moved = False
     try:
@@ -2791,7 +2860,14 @@ def preserve_tree_for_rollback(
         fail(f"{label} tree rollback object already exists")
     moved = False
     entry = PreservedTree(
-        target, path, label, max_bytes, snapshot, stage_root, parent_mtime_ns, backup_path
+        target,
+        path,
+        label,
+        max_bytes,
+        snapshot,
+        stage_root,
+        parent_mtime_ns,
+        backup_path,
     )
     try:
         if intent_entries is None:
@@ -2847,7 +2923,9 @@ def restore_preserved_tree_once(entry: PreservedTree) -> None:
         fail(f"{entry.label} tree rollback object disappeared")
     if entry.path.exists() or entry.path.is_symlink():
         remove_tree_until_absent_retry(
-            entry.path, max_bytes=entry.max_bytes, label=f"{entry.label} tree replacement"
+            entry.path,
+            max_bytes=entry.max_bytes,
+            label=f"{entry.label} tree replacement",
         )
     ensure_private_parent(entry.path, entry.target)
     try:
@@ -3036,7 +3114,9 @@ def parse_os_release(text: str) -> dict[str, str]:
     return values
 
 
-def read_linux_os_release(paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS) -> dict[str, str]:
+def read_linux_os_release(
+    paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS,
+) -> dict[str, str]:
     for path in paths:
         with contextlib.suppress(OSError):
             return parse_os_release(path.read_text(encoding="utf-8"))
@@ -3063,7 +3143,9 @@ def normalize_libc_family(name: str) -> str | None:
     return normalized
 
 
-def current_libc_info(libc_info: tuple[str, str] | None = None) -> tuple[str | None, str | None]:
+def current_libc_info(
+    libc_info: tuple[str, str] | None = None,
+) -> tuple[str | None, str | None]:
     raw_family, raw_version = libc_info if libc_info is not None else platform.libc_ver()
     family = normalize_libc_family(raw_family)
     version = raw_version.strip() or None
@@ -3481,7 +3563,10 @@ def read_stamp(target: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     stamp = read_json_file(
-        path, max_bytes=METADATA_MAX_BYTES, label=STAMP_NAME, expected_mode=OWNER_FILE_MODE
+        path,
+        max_bytes=METADATA_MAX_BYTES,
+        label=STAMP_NAME,
+        expected_mode=OWNER_FILE_MODE,
     )
     return validate_stamp_value(stamp, target, "stamp")
 
@@ -3585,7 +3670,9 @@ def snapshot_files(
         paths.extend(extra_paths)
     for relative in (*tuple(dict.fromkeys(paths)), STAMP_NAME):
         snapshot[relative] = read_file_snapshot(
-            safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+            safe_target_path(target, relative),
+            max_bytes=MANAGED_MAX_BYTES,
+            label=relative,
         )
     return snapshot
 
@@ -3618,7 +3705,11 @@ def managed_files_match_snapshot(target: Path, snapshot: dict[str, FileSnapshot]
     for relative, item in snapshot.items():
         path = safe_target_path(target, relative)
         if not file_matches_snapshot(
-            path, item, max_bytes=MANAGED_MAX_BYTES, label=relative, reader=read_existing_file
+            path,
+            item,
+            max_bytes=MANAGED_MAX_BYTES,
+            label=relative,
+            reader=read_existing_file,
         ):
             return False
     return True
@@ -3864,7 +3955,8 @@ def ensure_cleanup_journal_projected_root_fits(
 ) -> None:
     payload = cleanup_root_payload_from_snapshot(target, root, snapshot)
     cleanup_journal_payload_from_roots(
-        target, cleanup_existing_root_payloads(target, replacement=(payload["name"], payload))
+        target,
+        cleanup_existing_root_payloads(target, replacement=(payload["name"], payload)),
     )
 
 
@@ -4471,7 +4563,9 @@ def drain_cleanup_journal(target: Path) -> None:
             continue
         validate_cleanup_tombstones(target, {"roots": [root]})
         for entry in sorted(
-            root["entries"], key=lambda item: len(Path(item["path"]).parts), reverse=True
+            root["entries"],
+            key=lambda item: len(Path(item["path"]).parts),
+            reverse=True,
         ):
             path = root_path if entry["path"] == "." else root_path / entry["path"]
             if not (path.exists() or path.is_symlink()):
@@ -4796,7 +4890,9 @@ def snapshot_lifecycle_state(
         control_tmp_dir(target), max_bytes=METADATA_MAX_BYTES, label="control tmp"
     )
     lock_parent_snapshot = snapshot_tree(
-        lock_parent_dir(target), max_bytes=METADATA_MAX_BYTES, label="target lock parent"
+        lock_parent_dir(target),
+        max_bytes=METADATA_MAX_BYTES,
+        label="target lock parent",
     )
     launch_images_snapshot = snapshot_tree(
         launch_image_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="launch images"
@@ -4860,7 +4956,10 @@ def restore_lifecycle_snapshot_once(target: Path, snapshot: LifecycleSnapshot) -
     restore_snapshot(target, snapshot.files)
     ensure_directory_entry(cleanup_root_dir(target), snapshot.cleanup_root_dir, "cleanup root")
     restore_tree_retry(
-        backup_pool(target), snapshot.backup_pool, max_bytes=METADATA_MAX_BYTES, label="backup pool"
+        backup_pool(target),
+        snapshot.backup_pool,
+        max_bytes=METADATA_MAX_BYTES,
+        label="backup pool",
     )
     restore_tree_retry(
         control_tmp_dir(target),
@@ -4919,7 +5018,9 @@ def build_backup_envelope(target: Path, stamp: dict[str, Any], slot: int) -> dic
     managed_paths = sorted(stamp.get("managed_files", {}))
     for relative in (*managed_paths, STAMP_NAME):
         data = read_existing_file(
-            safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+            safe_target_path(target, relative),
+            max_bytes=MANAGED_MAX_BYTES,
+            label=relative,
         )
         if data is None:
             fail(f"backup managed file is missing: {relative}")
@@ -4971,7 +5072,9 @@ def begin_backup_transaction(target: Path, stamp: dict[str, Any]) -> BackupTrans
 
 def cleanup_backup_transaction_stage(transaction: BackupTransaction) -> None:
     remove_tree_until_absent_retry(
-        transaction.stage_root, max_bytes=METADATA_MAX_BYTES, label="backup stage cleanup"
+        transaction.stage_root,
+        max_bytes=METADATA_MAX_BYTES,
+        label="backup stage cleanup",
     )
 
 
@@ -5712,7 +5815,10 @@ def software_presence(target: Path) -> list[str]:
     labels = (
         (software_stamp_path(target), SOFTWARE_STAMP_NAME),
         (software_root(target), ".nddev-software/grok-build"),
-        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+        (
+            software_version_dir(target),
+            f".nddev-software/grok-build/versions/{GROK_VERSION}",
+        ),
         (managed_grok_path(target), "bin/grok"),
     )
     return sorted(label for path, label in labels if existing_path_label(path, label) is not None)
@@ -5809,7 +5915,10 @@ def read_software_file(path: Path, label: str, *, max_bytes: int = SOFTWARE_MAX_
         os.close(descriptor)
     final = require_software_regular_file(path, label, max_bytes=max_bytes)
     expected = (before.st_dev, before.st_ino)
-    if (after.st_dev, after.st_ino) != expected or (final.st_dev, final.st_ino) != expected:
+    if (after.st_dev, after.st_ino) != expected or (
+        final.st_dev,
+        final.st_ino,
+    ) != expected:
         fail(f"{label} changed while reading")
     return b"".join(chunks)
 
@@ -5853,7 +5962,9 @@ def prepare_verified_launch_image(target: Path, expected_sha256: str) -> tuple[P
         temporary_descriptor = -1
         launch_image_dir(target).chmod(LOCK_PARENT_HELD_MODE)
         require_lockable_directory(
-            launch_image_dir(target), "Grok Build launch image directory", allow_locked=True
+            launch_image_dir(target),
+            "Grok Build launch image directory",
+            allow_locked=True,
         )
         flags = os.O_RDONLY
         if hasattr(os, "O_CLOEXEC"):
@@ -5983,7 +6094,9 @@ def snapshot_software_state(
         control_tmp_dir(target), max_bytes=SOFTWARE_MAX_BYTES, label="control tmp"
     )
     lock_parent_snapshot = snapshot_tree(
-        lock_parent_dir(target), max_bytes=METADATA_MAX_BYTES, label="target lock parent"
+        lock_parent_dir(target),
+        max_bytes=METADATA_MAX_BYTES,
+        label="target lock parent",
     )
     preserved = preserve_software_files(
         target,
@@ -6030,7 +6143,9 @@ def software_matches_snapshot(target: Path, snapshot: SoftwareSnapshot) -> bool:
             label="software root",
         )
         and directory_entry_matches(
-            software_container(target), snapshot.software_container_dir, ".nddev-software"
+            software_container(target),
+            snapshot.software_container_dir,
+            ".nddev-software",
         )
         and file_matches_snapshot(
             managed_grok_path(target),
@@ -6217,7 +6332,12 @@ def read_pinned_https_bytes(source: str, *, max_bytes: int, label: str) -> bytes
                 chunks.append(chunk)
     except GrokBuildSetupError:
         raise
-    except (http.client.HTTPException, OSError, TimeoutError, urllib.error.URLError) as exc:
+    except (
+        http.client.HTTPException,
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+    ) as exc:
         fail(f"{label} fetch failed: {exc}")
     content = b"".join(chunks)
     if expected_length is not None and expected_length != len(content):
@@ -6876,7 +6996,10 @@ def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> di
         (software_container(target), ".nddev-software"),
         (software_root(target), ".nddev-software/grok-build"),
         (software_versions_dir(target), ".nddev-software/grok-build/versions"),
-        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+        (
+            software_version_dir(target),
+            f".nddev-software/grok-build/versions/{GROK_VERSION}",
+        ),
         (managed_grok_path(target).parent, "bin"),
     ):
         directory_drift = software_directory_mode_drift(directory, label)
@@ -6886,7 +7009,9 @@ def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> di
     stamp_file = software_stamp_path(target)
     if stamp_file.exists() or stamp_file.is_symlink():
         stamp_info = require_software_regular_file(
-            stamp_file, f"Grok Build software stamp {stamp_file}", max_bytes=METADATA_MAX_BYTES
+            stamp_file,
+            f"Grok Build software stamp {stamp_file}",
+            max_bytes=METADATA_MAX_BYTES,
         )
         if stat.S_IMODE(stamp_info.st_mode) != OWNER_FILE_MODE:
             drift.append("software-stamp:mode")
@@ -6907,7 +7032,8 @@ def software_status_locked(target: Path, *, validate_cleanup: bool = True) -> di
             drift.append("software-stamp")
     else:
         binary = read_optional_software_file(
-            managed_grok_path(target), f"Grok Build managed binary {managed_grok_path(target)}"
+            managed_grok_path(target),
+            f"Grok Build managed binary {managed_grok_path(target)}",
         )
         version_binary = read_optional_software_file(
             software_tree_binary(target),
@@ -6981,7 +7107,10 @@ def validate_safe_software_presence(target: Path) -> None:
         (software_container(target), ".nddev-software"),
         (software_root(target), ".nddev-software/grok-build"),
         (software_versions_dir(target), ".nddev-software/grok-build/versions"),
-        (software_version_dir(target), f".nddev-software/grok-build/versions/{GROK_VERSION}"),
+        (
+            software_version_dir(target),
+            f".nddev-software/grok-build/versions/{GROK_VERSION}",
+        ),
     ):
         if directory.exists() or directory.is_symlink():
             require_private_directory(directory, label)
@@ -7053,10 +7182,16 @@ def install_grok_software(target: Path, command: str) -> dict[str, Any]:
                     f".nddev-software/grok-build/versions/{GROK_VERSION}",
                 )
                 software_atomic_write(
-                    software_tree_binary(target), artifact["binary"], target, OWNER_EXEC_MODE
+                    software_tree_binary(target),
+                    artifact["binary"],
+                    target,
+                    OWNER_EXEC_MODE,
                 )
                 software_atomic_write(
-                    managed_grok_path(target), artifact["binary"], target, OWNER_EXEC_MODE
+                    managed_grok_path(target),
+                    artifact["binary"],
+                    target,
+                    OWNER_EXEC_MODE,
                 )
                 software_atomic_write(
                     software_stamp_path(target), stamp_bytes, target, OWNER_FILE_MODE
@@ -7144,7 +7279,10 @@ def remove_grok_software(target: Path) -> dict[str, Any]:
         preserve_trees: list[Path] = []
         if managed_grok_path(target).exists() and not managed_grok_path(target).is_symlink():
             bin_entries = (
-                sorted(managed_grok_path(target).parent.iterdir(), key=lambda item: item.name)
+                sorted(
+                    managed_grok_path(target).parent.iterdir(),
+                    key=lambda item: item.name,
+                )
                 if managed_grok_path(target).parent.exists()
                 and not managed_grok_path(target).parent.is_symlink()
                 else []
@@ -7408,7 +7546,9 @@ def launch(target: Path, child_args: list[str]) -> int:
                 )
                 image_parent.chmod(OWNER_DIRECTORY_MODE)
                 require_lockable_directory(
-                    image_parent, "Grok Build launch image directory", allow_locked=False
+                    image_parent,
+                    "Grok Build launch image directory",
+                    allow_locked=False,
                 )
             with contextlib.suppress(FileNotFoundError):
                 launch_image.unlink()
@@ -7455,7 +7595,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--target", required=True)
     launch_parser.add_argument("child_args", nargs=argparse.REMAINDER)
+    provider_runtime_v3.add_commands(
+        subparsers,
+        add_provider_target,
+        permission_profiles=True,
+    )
     return parser.parse_args(argv)
+
+
+def add_provider_target(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--json", action="store_true")
 
 
 def emit(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -7480,9 +7630,29 @@ def dispatch(args: argparse.Namespace) -> int:
             as_json=args.json,
         )
         return 0
+    if args.command == "provider-info":
+        emit(PROVIDER_V3.info(), as_json=True)
+        return 0
+    if args.command in {"validate-bundle", "plan-operation", "apply-operation"}:
+        target = require_absolute_target(args.target)
+        if args.command == "validate-bundle":
+            result = PROVIDER_V3.validate(args)
+        elif args.command == "plan-operation":
+            result = PROVIDER_V3.plan(target, args)
+        else:
+            result = PROVIDER_V3.apply(target, args)
+        emit(result, as_json=True)
+        return 0
     require_command_supported_host(args.command)
     if args.command == "status":
-        emit(status_payload(require_absolute_target(args.target)), as_json=args.json)
+        target = require_absolute_target(args.target)
+        provider_status = PROVIDER_V3.status(target)
+        if provider_status["state"] == "managed":
+            emit(provider_status, as_json=args.json)
+        else:
+            legacy = status_payload(target)
+            legacy["target_digest"] = provider_status["target_digest"]
+            emit(legacy, as_json=args.json)
         return 0
     if args.command == "software-status":
         emit(software_status(require_absolute_target(args.target)), as_json=args.json)
@@ -7519,7 +7689,10 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "migrate":
         target = require_absolute_target(args.target)
-        emit(migrate_setup(target, load_setup(args.setup), args.profile), as_json=args.json)
+        emit(
+            migrate_setup(target, load_setup(args.setup), args.profile),
+            as_json=args.json,
+        )
         return 0
     if args.command == "restore":
         target = require_absolute_target(args.target)
@@ -7553,8 +7726,20 @@ def main(argv: list[str] | None = None) -> int:
     except JsonArgumentParseError as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         return 2
-    except GrokBuildSetupError as exc:
-        print(json.dumps({"error": str(exc)}, sort_keys=True))
+    except (GrokBuildSetupError, provider_wire_v3.ProtocolError) as exc:
+        payload: dict[str, Any] = {"error": str(exc)}
+        if isinstance(exc, provider_wire_v3.ProtocolError):
+            payload.update({"rejected": True, "reason": exc.reason})
+            if getattr(args, "command", None) == "validate-bundle":
+                payload.update(
+                    {
+                        "bundle_format": args.bundle_format,
+                        "bundle_digest": args.bundle_digest,
+                        "artifact_digest": args.artifact_digest,
+                        "bundle_size": args.bundle_size,
+                    }
+                )
+        print(json.dumps(payload, sort_keys=True))
         return 2
 
 

@@ -24,6 +24,20 @@ All target-bound setup, software, status, plan, restore, remove, and launch
 commands reject unsupported hosts before target resolution or runtime side
 effects. Product runtime management is scoped to macOS and Ubuntu hosts.
 
+## ai_stp provider protocol
+
+The public manager implements provider protocol v3 through `provider-info`,
+`validate-bundle`, `plan-operation`, and `apply-operation`. Prepared and
+component-composed setups therefore converge on the same exact HarnessBundle,
+pure plan, confirmation digest, target-lock revalidation, native projection,
+status, backup, restore, and ownership-scoped removal path. Provider state binds
+the exact setup passport, ordered component references, bundle and artifact,
+provider release, approved plan, target identity, and projected native files.
+
+Grok-native standalone software and launch commands remain separate capabilities.
+The bundle path accepts only the component kinds and native namespaces declared
+by `provider-info`; unsupported paths fail before planning or target mutation.
+
 ## Setup And Profiles
 
 The content setup is `nddev-builder`. It enables maximum documented builder

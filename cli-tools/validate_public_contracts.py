@@ -78,9 +78,15 @@ def validate_gds_contract() -> None:
         stat.S_ISDIR(gds.lstat().st_mode) and not stat.S_ISLNK(gds.lstat().st_mode),
         ".gds must be a real directory",
     )
-    require({item.name for item in gds.iterdir()} == GDS_ENTRIES, ".gds directory entries mismatch")
+    require(
+        {item.name for item in gds.iterdir()} == GDS_ENTRIES,
+        ".gds directory entries mismatch",
+    )
     for name in GDS_ENTRIES:
-        require(_regular_file(gds / name), f".gds/{name} must be a tracked-style regular file")
+        require(
+            _regular_file(gds / name),
+            f".gds/{name} must be a tracked-style regular file",
+        )
 
     repository = (gds / "repository.yaml").read_text(encoding="utf-8").splitlines()
     agent_headers = [
@@ -89,7 +95,8 @@ def validate_gds_contract() -> None:
         if re.match(r"""^\s*(?:"agent"|'agent'|agent)\s*:\s*(?:#.*)?$""", line)
     ]
     require(
-        agent_headers == ["agent:"], "repository must contain exactly one canonical agent section"
+        agent_headers == ["agent:"],
+        "repository must contain exactly one canonical agent section",
     )
     agent_lookalikes = [
         line
@@ -128,7 +135,10 @@ def validate_gds_contract() -> None:
         for line in repository[agent_start + 1 : agent_end]
         if line.startswith("  generated_agents: ")
     ]
-    require(generated == ["true"], "agent.generated_agents must occur exactly once and be true")
+    require(
+        generated == ["true"],
+        "agent.generated_agents must occur exactly once and be true",
+    )
 
     lines = (gds / "bundle.lock.yaml").read_text(encoding="utf-8").splitlines()
     require(
@@ -232,7 +242,8 @@ def validate_gds_contract() -> None:
     for entry in entries:
         projection = ROOT / entry["path"]
         require(
-            _regular_file(projection), f"managed projection is not a regular file: {entry['path']}"
+            _regular_file(projection),
+            f"managed projection is not a regular file: {entry['path']}",
         )
         require(
             entry["digest"] == f"sha256:{hashlib.sha256(projection.read_bytes()).hexdigest()}",
@@ -246,7 +257,10 @@ def validate_gds_contract() -> None:
         return set(match.group(1).split())
 
     require(".gds" in closure("archive_paths"), "release archive_paths must include .gds")
-    require(".gds" not in closure("runtime_paths"), "release runtime_paths must exclude .gds")
+    require(
+        ".gds" not in closure("runtime_paths"),
+        "release runtime_paths must exclude .gds",
+    )
 
 
 def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -260,8 +274,14 @@ def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
     require(manifest.get("build_version") == version, "manifest version mismatch")
     runtime = build.get("grok_build_tested")
     require(runtime == baseline["release"]["npm_version"], "baseline runtime mismatch")
-    require(contract["software_lifecycle"]["version"] == runtime, "contract runtime mismatch")
-    require(manifest["software_lifecycle"]["version"] == runtime, "manifest runtime mismatch")
+    require(
+        contract["software_lifecycle"]["version"] == runtime,
+        "contract runtime mismatch",
+    )
+    require(
+        manifest["software_lifecycle"]["version"] == runtime,
+        "manifest runtime mismatch",
+    )
     require(contract.get("version_ref") == "build/version.json", "version_ref mismatch")
     require(contract.get("manifest_ref") == "build/manifest.json", "manifest_ref mismatch")
     return manifest, contract, baseline
@@ -271,7 +291,10 @@ def validate_catalog(manifest: dict[str, Any], contract: dict[str, Any]) -> None
     require(manifest.get("setup_ids") == SETUPS, "manifest setup ids mismatch")
     require(manifest.get("profile_ids") == PROFILES, "manifest profile ids mismatch")
     require(contract["setup_system"]["setup_ids"] == SETUPS, "contract setup ids mismatch")
-    require(contract["setup_system"]["profile_ids"] == PROFILES, "contract profile ids mismatch")
+    require(
+        contract["setup_system"]["profile_ids"] == PROFILES,
+        "contract profile ids mismatch",
+    )
     require(manifest.get("default_setup") == "nddev-builder", "default setup mismatch")
     require(manifest.get("default_profile") == "full-auto", "default profile mismatch")
     setup = load_json("setups/nddev-builder/setup.json")
@@ -335,7 +358,10 @@ def validate_runtime_integrity(
         "native_npm_packages",
         "archive_policy",
     ):
-        require(lifecycle[key] == manifest_lifecycle[key], f"software lifecycle {key} mismatch")
+        require(
+            lifecycle[key] == manifest_lifecycle[key],
+            f"software lifecycle {key} mismatch",
+        )
     require(
         lifecycle["native_npm_packages"] == baseline["release"]["native_npm_package_mapping"],
         "native npm package ledger mismatch",
@@ -403,7 +429,10 @@ def validate_static_source() -> None:
     ):
         require(marker not in source, f"public manager contains test marker {marker}")
     for marker in FORBIDDEN_RAW_MANAGER_MARKERS:
-        require(marker not in source, f"public manager contains raw observation marker {marker}")
+        require(
+            marker not in source,
+            f"public manager contains raw observation marker {marker}",
+        )
 
 
 def validate_release_surface() -> None:
@@ -428,13 +457,57 @@ def validate_release_surface() -> None:
         require((ROOT / relative).exists(), f"missing release path {relative}")
     bridge_root = ROOT / ".claude"
     bridge = bridge_root / "CLAUDE.md"
-    require(stat.S_ISDIR(bridge_root.lstat().st_mode), "Claude bridge root must be a directory")
+    require(
+        stat.S_ISDIR(bridge_root.lstat().st_mode),
+        "Claude bridge root must be a directory",
+    )
     require(
         sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
         "Claude bridge directory must contain only CLAUDE.md",
     )
     require(stat.S_ISREG(bridge.lstat().st_mode), "Claude bridge must be a regular file")
     require(bridge.read_bytes() == b"@../AGENTS.md\n", "Claude bridge mismatch")
+    require(
+        not (ROOT / ".github/workflows").exists(),
+        "public Actions workflows are forbidden",
+    )
+
+
+def validate_provider_protocol(manifest: dict[str, Any], contract: dict[str, Any]) -> None:
+    require(
+        stat.S_IMODE((ROOT / "cli-tools/nddev_grok_build.py").stat().st_mode) == 0o755,
+        "provider manager must be executable with mode 0755",
+    )
+    expected_commands = [
+        "provider-info",
+        "validate-bundle",
+        "plan-operation",
+        "apply-operation",
+        "recover-operation",
+        "status",
+    ]
+    expected_operations = ["backup", "install", "remove", "replace", "restore"]
+    for label, document in (("manifest", manifest), ("contract", contract)):
+        provider = document.get("provider_protocol")
+        require(isinstance(provider, dict), f"{label} provider protocol missing")
+        require(provider.get("version") == 3, f"{label} provider version mismatch")
+        require(
+            provider.get("bundle_format") == "ai-stp-bundle/1",
+            f"{label} bundle mismatch",
+        )
+        require(
+            provider.get("commands") == expected_commands,
+            f"{label} provider commands mismatch",
+        )
+        require(
+            provider.get("operations") == expected_operations,
+            f"{label} provider operations mismatch",
+        )
+    for relative in (
+        "cli-tools/provider_protocol_v3.py",
+        "cli-tools/provider_runtime_v3.py",
+    ):
+        require(_regular_file(ROOT / relative), f"provider runtime file missing: {relative}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -445,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_marketplace((ROOT / "VERSION").read_text(encoding="utf-8").strip())
         validate_runtime_integrity(manifest, contract, baseline)
         validate_static_source()
+        validate_provider_protocol(manifest, contract)
         validate_gds_contract()
         validate_release_surface()
     except Exception as exc:

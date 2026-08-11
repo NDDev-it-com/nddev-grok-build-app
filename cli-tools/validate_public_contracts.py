@@ -48,6 +48,7 @@ GDS_ENTRIES = {"bundle.lock.yaml", "compiled-policy.json", "repository.yaml"}
 GDS_PROJECTIONS = (".claude/CLAUDE.md", ".gds/compiled-policy.json", "AGENTS.md")
 SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+SOURCE_TREE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -157,9 +158,16 @@ def validate_gds_contract() -> None:
     require(bundle_start == 3, "unexpected content before bundle section")
     bundle = lines[bundle_start + 1 : projection_start]
     require(
-        sum(re.match(r"""^\s*["']?source_commit["']?\s*:""", line) is not None for line in lines)
+        sum(
+            re.match(
+                r"""^\s*["']?(?:source_tree_digest|source_commit)["']?\s*:""",
+                line,
+            )
+            is not None
+            for line in lines
+        )
         == 1,
-        "source_commit must occur exactly once globally",
+        "bundle source identity must occur exactly once globally",
     )
     require(
         sum(re.match(r"""^\s*["']?output_digest["']?\s*:""", line) is not None for line in lines)
@@ -172,7 +180,10 @@ def validate_gds_contract() -> None:
     )
     require(
         [line.split(":", 1)[0].strip() for line in bundle if line]
-        == ["version", "release_sequence", "channel", "source_commit", "digest"],
+        in (
+            ["version", "release_sequence", "channel", "source_tree_digest", "digest"],
+            ["version", "release_sequence", "channel", "source_commit", "digest"],
+        ),
         "bundle keys mismatch",
     )
     require(
@@ -183,12 +194,18 @@ def validate_gds_contract() -> None:
         ),
         "bundle key serialization mismatch",
     )
-    source_lines = [line for line in bundle if line.startswith("  source_commit: ")]
-    require(len(source_lines) == 1, "bundle.source_commit missing or duplicated")
-    source = json.loads(source_lines[0].split(": ", 1)[1])
+    source_lines = [
+        line
+        for line in bundle
+        if line.startswith("  source_tree_digest: ") or line.startswith("  source_commit: ")
+    ]
+    require(len(source_lines) == 1, "bundle source identity missing or duplicated")
+    source_key, source_raw = source_lines[0].split(": ", 1)
+    source = json.loads(source_raw)
+    pattern = SOURCE_TREE_DIGEST if source_key.strip() == "source_tree_digest" else SOURCE_COMMIT
     require(
-        isinstance(source, str) and SOURCE_COMMIT.fullmatch(source) is not None,
-        "bundle.source_commit format mismatch",
+        isinstance(source, str) and pattern.fullmatch(source) is not None,
+        "bundle source identity format mismatch",
     )
     files_index = lines.index("  files:", projection_start + 1)
     projection_head = lines[projection_start + 1 : files_index]
